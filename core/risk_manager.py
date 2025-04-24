@@ -3,100 +3,250 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from config.settings import settings
+import logging
 from utils.logger import setup_logger
-from .exchange import ExchangeInterface
+from .exchange import Exchange
+from decimal import Decimal
 
-logger = setup_logger(__name__)
+logger = logging.getLogger(__name__)
 
 class RiskManager:
-    def __init__(self, exchange: ExchangeInterface):
-        self.exchange = exchange
-        self.daily_pnl = 0.0
-        self.last_reset = datetime.now()
-        self.max_drawdown = 0.0
-        self.peak_balance = 0.0
-        self.trade_history = []
-        self.volatility_history = []
-
-    def check_daily_loss_limit(self) -> bool:
-        """일일 손실 한도 체크"""
-        if (datetime.now() - self.last_reset).days >= 1:
-            self.daily_pnl = 0.0
-            self.last_reset = datetime.now()
+    def __init__(self):
+        self.initial_capital = Decimal('10000.0')  # 기본 초기 자본금
+        self.max_daily_loss = 0.1  # 일일 최대 손실 한도 (10%)
+        self.max_drawdown = 0.3    # 최대 드로다운 한도 (30%)
+        self.max_position_size = 0.3  # 최대 포지션 크기 (30%)
+        self.max_leverage = 20.0   # 최대 레버리지 20x
+        self.min_leverage = 5.0    # 최소 레버리지 5x
         
-        if self.daily_pnl <= -settings.MAX_DAILY_LOSS:
-            logger.warning(f"일일 손실 한도 도달: {self.daily_pnl:.2%}")
+        self.daily_pnl = 0.0        # 일일 손익
+        self.total_pnl = 0.0        # 총 손익
+        self.max_equity = 0.0       # 최대 자산
+        self.current_equity = self.initial_capital   # 현재 자산
+        self.last_reset_time = None # 마지막 리셋 시간
+        
+        self.consecutive_losses = 0  # 연속 손실 횟수
+        self.max_consecutive_losses = 5  # 최대 연속 손실 횟수
+        
+        self.risk_level = 'medium'  # 현재 리스크 레벨
+        self.volatility_thresholds = {
+            'very_low': 0.005,
+            'low': 0.01,
+            'medium': 0.02,
+            'high': 0.03,
+            'very_high': 0.05
+        }
+        
+        logger.info("리스크 매니저 초기화 완료")
+        
+    def _validate_account_state(self) -> bool:
+        """계좌 상태 검증"""
+        try:
+            if self.current_equity <= 0:
+                logger.warning("계좌 자산이 0 이하입니다. 초기 자본금으로 재설정합니다.")
+                self.current_equity = self.initial_capital
+                self.max_equity = self.initial_capital
+                self.daily_pnl = 0.0
+                self.total_pnl = 0.0
+                self.consecutive_losses = 0
+                self.risk_level = 'medium'
+                return True
+                
+            if self.max_equity <= 0:
+                self.max_equity = self.current_equity
+                
+            return True
+            
+        except Exception as e:
+            logger.error(f"계좌 상태 검증 중 오류 발생: {e}")
             return False
-        return True
 
-    def calculate_position_size(self, price: float) -> float:
-        """변동성 기반 포지션 사이즈 계산"""
+    def update_account_state(self, equity: float, pnl: float) -> None:
+        """계좌 상태 업데이트"""
         try:
-            # OHLCV 데이터 가져오기
-            ohlcv = self.exchange.get_ohlcv('1h', 24)  # 24시간 데이터
-            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            
-            # 변동성 계산
-            vol_range = (df['high'].max() - df['low'].min()) / df['close'].iloc[-1]
-            vol_std = df['close'].pct_change().rolling(14).std().iloc[-1]
-            vol = max(vol_range, vol_std)
-            
-            # 변동성 기록
-            self.volatility_history.append(vol)
-            if len(self.volatility_history) > 100:
-                self.volatility_history.pop(0)
-            
-            # 변동성 평균
-            avg_vol = np.mean(self.volatility_history)
-            
-            # 잔고 조회
-            balance = self.exchange.get_balance()['free']
-            
-            # 변동성에 따른 포지션 크기 조정
-            if vol < avg_vol * 0.5:  # 변동성이 평균의 50% 미만
-                pct = 0.8
-            elif vol < avg_vol:  # 변동성이 평균 미만
-                pct = 0.6
-            elif vol < avg_vol * 1.5:  # 변동성이 평균의 150% 미만
-                pct = 0.4
-            else:  # 변동성이 평균의 150% 이상
-                pct = 0.2
+            # 일일 손익 리셋 체크
+            current_time = datetime.now()
+            if (self.last_reset_time is None or 
+                (current_time - self.last_reset_time).days >= 1):
+                self.daily_pnl = Decimal('0.0')
+                self.last_reset_time = current_time
                 
-            # 최대 포지션 크기 제한
-            max_position = balance * settings.MAX_POSITION_SIZE
-            position_size = (balance * pct) / price
+            # 계좌 상태 업데이트
+            self.current_equity = Decimal(str(equity))
+            self.daily_pnl += Decimal(str(pnl))
+            self.total_pnl += Decimal(str(pnl))
             
-            # 레버리지 조정
-            leverage = self.calculate_leverage(vol)
-            position_size *= leverage
-            
-            return min(position_size, max_position)
+            # 최대 자산 업데이트
+            if self.current_equity > self.max_equity:
+                self.max_equity = self.current_equity
+                
+            # 리스크 레벨 업데이트
+            self._update_risk_level()
             
         except Exception as e:
-            logger.error(f"포지션 사이즈 계산 실패: {e}")
-            return 0.0
+            logger.error(f"계좌 상태 업데이트 중 오류 발생: {e}")
 
-    def calculate_leverage(self, volatility: float) -> float:
-        """변동성 기반 레버리지 계산"""
+    def _update_risk_level(self) -> None:
+        """리스크 레벨 업데이트"""
         try:
-            # 기본 레버리지
-            base_leverage = settings.LEVERAGE
+            # 일일 손실 체크
+            daily_loss_limit = Decimal(str(self.max_daily_loss)) * self.max_equity
+            if self.daily_pnl <= -daily_loss_limit:
+                self.risk_level = 'very_high'
+                return
+                
+            # 드로다운 체크
+            drawdown = (self.max_equity - self.current_equity) / self.max_equity
+            if drawdown >= Decimal(str(self.max_drawdown)):
+                self.risk_level = 'very_high'
+                return
+                
+            # 연속 손실 체크
+            if self.consecutive_losses >= self.max_consecutive_losses:
+                self.risk_level = 'high'
+                return
+                
+            # 기본 리스크 레벨
+            self.risk_level = 'medium'
             
-            # 변동성에 따른 레버리지 조정
-            if volatility < 0.005:  # 매우 낮은 변동성
-                return min(base_leverage * 2, 20)  # 최대 20배
+        except Exception as e:
+            logger.error(f"리스크 레벨 업데이트 중 오류 발생: {e}")
+            self.risk_level = 'high'
+
+    def calculate_position_size(self, market_data: Dict[str, Any], current_price: float) -> Tuple[float, int]:
+        """포지션 크기 계산"""
+        try:
+            # 기본 포지션 크기
+            base_size = Decimal('0.15')  # 계좌의 15%
+            
+            # 변동성 기반 조정
+            volatility = Decimal(str(market_data.get('volatility', 0.02)))
+            if volatility > Decimal('0.03'):  # 높은 변동성
+                base_size *= Decimal('0.8')
+            elif volatility < Decimal('0.01'):  # 낮은 변동성
+                base_size *= Decimal('1.5')
+                
+            # 리스크 레벨 기반 조정
+            risk_level = market_data.get('risk_level', 'medium')
+            if risk_level == 'high':
+                base_size *= Decimal('0.8')
+            elif risk_level == 'low':
+                base_size *= Decimal('1.5')
+                
+            # 포지션 크기 제한
+            position_size = max(min(base_size, Decimal(str(self.max_position_size))), Decimal('0.05'))
+            
+            # 레버리지 계산
+            leverage = self._calculate_leverage(float(volatility))
+            
+            return float(position_size), leverage
+            
+        except Exception as e:
+            logger.error(f"포지션 크기 계산 중 오류 발생: {e}")
+            return 0.15, 20  # 기본값 반환
+
+    def _calculate_leverage(self, volatility: float) -> int:
+        """레버리지 계산"""
+        try:
+            # 기본 레버리지 증가
+            base_leverage = self.min_leverage
+            
+            # 변동성 기반 조정
+            if volatility > 0.03:  # 높은 변동성
+                base_leverage = max(self.min_leverage, base_leverage * 0.8)
             elif volatility < 0.01:  # 낮은 변동성
-                return min(base_leverage * 1.5, 15)  # 최대 15배
-            elif volatility < 0.02:  # 중간 변동성
-                return base_leverage
-            elif volatility < 0.03:  # 높은 변동성
-                return max(base_leverage * 0.5, 5)  # 최소 5배
-            else:  # 매우 높은 변동성
-                return max(base_leverage * 0.25, 3)  # 최소 3배
+                base_leverage = min(self.max_leverage, base_leverage * 2.0)
                 
+            # 리스크 레벨 기반 조정
+            if self.risk_level == 'very_high':
+                base_leverage = max(self.min_leverage, base_leverage * 0.8)
+            elif self.risk_level == 'high':
+                base_leverage = min(self.max_leverage, base_leverage * 1.2)
+            elif self.risk_level == 'low':
+                base_leverage = min(self.max_leverage, base_leverage * 1.5)
+                
+            # 레버리지 제한
+            leverage = max(min(base_leverage, self.max_leverage), self.min_leverage)
+            
+            return int(leverage)
+            
         except Exception as e:
-            logger.error(f"레버리지 계산 실패: {e}")
-            return settings.LEVERAGE
+            logger.error(f"레버리지 계산 중 오류 발생: {e}")
+            return 20  # 기본값 반환
+
+    def check_risk_limits(self, market_data: Dict[str, Any] = None) -> bool:
+        """리스크 한도 체크"""
+        try:
+            if not self._validate_account_state():
+                return False
+                
+            # 일일 손실 한도 체크
+            daily_loss_limit = Decimal(str(self.max_daily_loss)) * self.max_equity
+            if self.daily_pnl <= -daily_loss_limit:
+                logger.warning(f"일일 손실 한도 초과: {self.daily_pnl:.2%}")
+                return False
+                
+            # 드로다운 한도 체크
+            drawdown = (self.max_equity - self.current_equity) / self.max_equity
+            if drawdown >= Decimal(str(self.max_drawdown)):
+                logger.warning(f"드로다운 한도 초과: {drawdown:.2%}")
+                return False
+                
+            # 연속 손실 한도 체크
+            if self.consecutive_losses >= self.max_consecutive_losses:
+                logger.warning(f"연속 손실 한도 초과: {self.consecutive_losses}회")
+                return False
+                
+            return True
+            
+        except Exception as e:
+            logger.error(f"리스크 한도 체크 중 오류 발생: {e}")
+            return False
+
+    def update_trade_result(self, is_profit: bool, pnl: float) -> None:
+        """거래 결과 업데이트"""
+        try:
+            if is_profit:
+                self.consecutive_losses = 0
+            else:
+                self.consecutive_losses += 1
+                
+            self.update_account_state(self.current_equity, pnl)
+            
+        except Exception as e:
+            logger.error(f"거래 결과 업데이트 중 오류 발생: {e}")
+
+    def get_risk_metrics(self) -> Dict[str, Any]:
+        """리스크 메트릭 반환"""
+        try:
+            drawdown = (self.max_equity - self.current_equity) / self.max_equity if self.max_equity > 0 else 0.0
+            
+            return {
+                'daily_pnl': float(self.daily_pnl),
+                'total_pnl': float(self.total_pnl),
+                'current_equity': float(self.current_equity),
+                'max_equity': float(self.max_equity),
+                'drawdown': float(drawdown),
+                'consecutive_losses': self.consecutive_losses,
+                'risk_level': self.risk_level
+            }
+            
+        except Exception as e:
+            logger.error(f"리스크 메트릭 계산 중 오류 발생: {e}")
+            return {}
+
+    def reset(self) -> None:
+        """리스크 관리자 초기화"""
+        try:
+            self.daily_pnl = 0.0
+            self.total_pnl = 0.0
+            self.max_equity = self.current_equity
+            self.last_reset_time = datetime.now()
+            self.consecutive_losses = 0
+            self.risk_level = 'medium'
+            
+        except Exception as e:
+            logger.error(f"리스크 관리자 초기화 중 오류 발생: {e}")
 
     def check_liquidation_risk(self, side: str, entry_price: float, current_price: float) -> bool:
         """청산 위험 체크"""
@@ -131,17 +281,6 @@ class RiskManager:
         else:
             drawdown = (self.peak_balance - balance) / self.peak_balance
             self.max_drawdown = max(self.max_drawdown, drawdown)
-
-    def get_risk_metrics(self) -> Dict[str, float]:
-        """리스크 지표 반환"""
-        return {
-            'daily_pnl': self.daily_pnl,
-            'max_drawdown': self.max_drawdown,
-            'peak_balance': self.peak_balance,
-            'total_trades': len(self.trade_history),
-            'win_rate': self.calculate_win_rate(),
-            'avg_volatility': np.mean(self.volatility_history) if self.volatility_history else 0
-        }
 
     def calculate_win_rate(self) -> float:
         """승률 계산"""

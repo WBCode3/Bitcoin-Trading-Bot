@@ -1,248 +1,239 @@
 import pandas as pd
 import numpy as np
-from datetime import datetime
-from typing import Dict, Any, List, Tuple
-from config.settings import settings
-from utils.logger import setup_logger
+from typing import Dict, Any, List, Optional
+from datetime import datetime, timedelta
+import logging
+from .market_analyzer import MarketAnalyzer
 from .strategy import TradingStrategy
+from .position_manager import PositionManager
+from .performance_tracker import PerformanceTracker
+from .risk_manager import RiskManager
+from .utils import calculate_slippage, calculate_commission
 
-logger = setup_logger(__name__)
+logger = logging.getLogger(__name__)
 
 class BacktestEngine:
-    def __init__(self, strategy: TradingStrategy):
-        self.strategy = strategy
-        self.trades: List[Dict[str, Any]] = []
-        self.equity_curve: List[float] = []
-        self.initial_balance = 10000  # 초기 자본 10,000 USDT
-        self.slippage_pct = 0.0005  # 0.05% 슬리피지
-        self.fee_rate = 0.0004  # 0.04% 수수료
-
-    def apply_slippage(self, price: float, side: str) -> float:
-        """슬리피지 적용"""
-        if side == 'buy':
-            return price * (1 + self.slippage_pct)
-        else:
-            return price * (1 - self.slippage_pct)
-
-    def calculate_fee(self, amount: float, price: float) -> float:
-        """수수료 계산"""
-        return amount * price * self.fee_rate
-
-    def run(self, data1: pd.DataFrame, data5: pd.DataFrame) -> Dict[str, Any]:
-        """백테스트 실행"""
+    def __init__(self, initial_balance: float = 500000):
+        self.initial_balance = initial_balance
+        self.market_analyzer = MarketAnalyzer()
+        self.strategy = TradingStrategy()
+        self.position_manager = PositionManager(initial_balance)
+        self.performance_tracker = PerformanceTracker()
+        self.risk_manager = RiskManager()
+        
+        # 백테스팅 설정
+        self.slippage_model = 'normal'  # normal, aggressive, conservative
+        self.commission_rate = 0.0004  # 0.04%
+        self.min_trade_size = 0.001  # 최소 거래 수량
+        self.partial_liquidation = True  # 부분 청산 사용 여부
+        self.max_partial_liquidation = 0.5  # 최대 부분 청산 비율
+        
+    async def run(self, data: pd.DataFrame, market_conditions: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """백테스팅 실행"""
         try:
-            current_balance = self.initial_balance
-            position = None
-            entry_price = 0
-            entry_time = None
-            max_balance = self.initial_balance
-            max_drawdown = 0
-            
-            for i in range(len(data1)):
-                current_data1 = data1.iloc[:i+1]
-                current_data5 = data5.iloc[:i+1]
-                current_price = data1['close'].iloc[i]
-                current_time = data1.index[i]
-                
-                # 포지션이 없는 경우
-                if position is None:
-                    # 진입 조건 체크
-                    side = self.strategy.check_entry_conditions(current_data1, current_data5)
-                    if side:
-                        # 포지션 사이즈 계산
-                        position_size = self.strategy.risk_manager.calculate_position_size(current_price)
-                        if side == 'aggressive_long':
-                            position_size = current_balance / current_price
-                        
-                        if position_size > 0:
-                            # 슬리피지 적용
-                            entry_price = self.apply_slippage(current_price, 'buy' if 'long' in side else 'sell')
-                            
-                            # 수수료 차감
-                            fee = self.calculate_fee(position_size, entry_price)
-                            current_balance -= fee
-                            
-                            position = side
-                            entry_time = current_time
-                            self.trades.append({
-                                'type': 'entry',
-                                'side': side,
-                                'price': entry_price,
-                                'time': current_time,
-                                'size': position_size,
-                                'fee': fee
-                            })
-                
-                # 포지션이 있는 경우
-                else:
-                    # Crash/Spike 감지
-                    if self.strategy.detect_crash(current_data1, current_data5):
-                        # 포지션 청산
-                        exit_price = self.apply_slippage(current_price, 'sell' if position == 'long' else 'buy')
-                        fee = self.calculate_fee(position_size, exit_price)
-                        
-                        if position == 'long':
-                            pnl = (exit_price - entry_price) / entry_price
-                        else:
-                            pnl = (entry_price - exit_price) / entry_price
-                        
-                        current_balance *= (1 + pnl)
-                        current_balance -= fee
-                        
-                        self.trades.append({
-                            'type': 'exit',
-                            'side': position,
-                            'price': exit_price,
-                            'time': current_time,
-                            'pnl': pnl,
-                            'fee': fee,
-                            'reason': 'crash'
-                        })
-                        
-                        # 숏 진입
-                        short_size = self.strategy.risk_manager.calculate_position_size(current_price)
-                        entry_price = self.apply_slippage(current_price, 'sell')
-                        fee = self.calculate_fee(short_size, entry_price)
-                        current_balance -= fee
-                        
-                        position = 'short'
-                        entry_time = current_time
-                        self.trades.append({
-                            'type': 'entry',
-                            'side': 'short',
-                            'price': entry_price,
-                            'time': current_time,
-                            'size': short_size,
-                            'fee': fee,
-                            'reason': 'crash_short'
-                        })
-                        continue
-                        
-                    if self.strategy.detect_spike(current_data1):
-                        # 포지션 청산
-                        exit_price = self.apply_slippage(current_price, 'sell' if position == 'long' else 'buy')
-                        fee = self.calculate_fee(position_size, exit_price)
-                        
-                        if position == 'long':
-                            pnl = (exit_price - entry_price) / entry_price
-                        else:
-                            pnl = (entry_price - exit_price) / entry_price
-                        
-                        current_balance *= (1 + pnl)
-                        current_balance -= fee
-                        
-                        self.trades.append({
-                            'type': 'exit',
-                            'side': position,
-                            'price': exit_price,
-                            'time': current_time,
-                            'pnl': pnl,
-                            'fee': fee,
-                            'reason': 'spike'
-                        })
-                        
-                        position = None
-                        entry_price = 0
-                        entry_time = None
-                        continue
-                    
-                    # 청산 조건 체크
-                    should_exit, close_pct = self.strategy.check_exit_conditions(current_data1, position, entry_price)
-                    if should_exit:
-                        # 포지션 청산
-                        exit_price = self.apply_slippage(current_price, 'sell' if position == 'long' else 'buy')
-                        close_amount = position_size * close_pct
-                        fee = self.calculate_fee(close_amount, exit_price)
-                        
-                        if position == 'long':
-                            pnl = (exit_price - entry_price) / entry_price
-                        else:
-                            pnl = (entry_price - exit_price) / entry_price
-                        
-                        current_balance *= (1 + pnl * close_pct)
-                        current_balance -= fee
-                        
-                        self.trades.append({
-                            'type': 'exit',
-                            'side': position,
-                            'price': exit_price,
-                            'time': current_time,
-                            'pnl': pnl,
-                            'fee': fee,
-                            'close_pct': close_pct
-                        })
-                        
-                        if close_pct == 1.0:
-                            position = None
-                            entry_price = 0
-                            entry_time = None
-                        else:
-                            position_size *= (1 - close_pct)
-                
-                # 자본 곡선 업데이트
-                self.equity_curve.append(current_balance)
-                
-                # 최대 드로다운 계산
-                if current_balance > max_balance:
-                    max_balance = current_balance
-                else:
-                    drawdown = (max_balance - current_balance) / max_balance
-                    max_drawdown = max(max_drawdown, drawdown)
-            
-            # 성과 지표 계산
-            metrics = self.calculate_metrics()
-            metrics['max_drawdown'] = max_drawdown
-            
-            return {
-                'trades': self.trades,
-                'equity_curve': self.equity_curve,
-                'metrics': metrics
+            results = {
+                'trades': [],
+                'equity_curve': [],
+                'metrics': {},
+                'market_conditions': market_conditions or {}
             }
             
+            current_balance = self.initial_balance
+            current_position = None
+            
+            for i in range(len(data)):
+                try:
+                    # 현재 시장 데이터
+                    current_data = data.iloc[i]
+                    
+                    # 시장 분석
+                    market_analysis = self.market_analyzer.analyze_market_condition(current_data)
+                    
+                    # 리스크 관리
+                    if not self.risk_manager.check_risk_limits(market_analysis):
+                        continue
+                        
+                    # 매매 신호 생성
+                    signal = self.strategy.generate_signal(market_analysis)
+                    
+                    if signal:
+                        # 슬리피지 계산
+                        slippage = calculate_slippage(
+                            current_data['volume'],
+                            signal['amount'],
+                            self.slippage_model
+                        )
+                        
+                        # 커미션 계산
+                        commission = calculate_commission(
+                            signal['amount'],
+                            current_data['close'],
+                            self.commission_rate
+                        )
+                        
+                        # 거래 실행
+                        trade_result = await self._execute_trade(
+                            signal,
+                            current_data,
+                            slippage,
+                            commission
+                        )
+                        
+                        if trade_result:
+                            results['trades'].append(trade_result)
+                            current_balance = trade_result['balance_after']
+                            current_position = trade_result['position']
+                            
+                    # 자본 곡선 업데이트
+                    results['equity_curve'].append(current_balance)
+                    
+                    # 성과 지표 업데이트
+                    if i % 1440 == 0:  # 매일
+                        daily_metrics = self.performance_tracker.calculate_daily_metrics(results['trades'])
+                        results['metrics'].update(daily_metrics)
+                        
+                except Exception as e:
+                    logger.error(f"백테스팅 중 오류 발생: {e}")
+                    continue
+                    
+            # 최종 성과 지표 계산
+            final_metrics = self._calculate_final_metrics(results)
+            results['metrics'].update(final_metrics)
+            
+            return results
+            
         except Exception as e:
-            logger.error(f"백테스트 실행 중 오류 발생: {e}")
-            return {}
-
-    def calculate_metrics(self) -> Dict[str, float]:
-        """성과 지표 계산"""
+            logger.error(f"백테스팅 실행 중 오류 발생: {e}")
+            return None
+            
+    async def _execute_trade(self, signal: Dict[str, Any], data: pd.DataFrame,
+                           slippage: float, commission: float) -> Optional[Dict[str, Any]]:
+        """거래 실행 시뮬레이션"""
         try:
-            # 수익률
-            returns = pd.Series(self.equity_curve).pct_change().dropna()
-            total_return = (self.equity_curve[-1] / self.initial_balance) - 1
+            if signal['type'] == 'buy':
+                # 포지션 크기 계산
+                position_size = self.position_manager.calculate_position_size(
+                    data,
+                    signal['risk_level']
+                )
+                
+                if position_size < self.min_trade_size:
+                    return None
+                    
+                # 레버리지 계산
+                leverage = self.position_manager.calculate_leverage(data)
+                
+                # 거래 실행
+                entry_price = data['close'] * (1 + slippage)
+                position_value = position_size * entry_price
+                commission_paid = position_value * commission
+                
+                # 포지션 정보 업데이트
+                self.position_manager.update_position(
+                    entry_price,
+                    position_size,
+                    leverage,
+                    data
+                )
+                
+                return {
+                    'type': 'buy',
+                    'time': data.name,
+                    'price': entry_price,
+                    'amount': position_size,
+                    'leverage': leverage,
+                    'commission': commission_paid,
+                    'slippage': slippage,
+                    'position': 'long',
+                    'balance_after': self.position_manager.current_balance - commission_paid
+                }
+                
+            elif signal['type'] == 'sell':
+                if not self.position_manager.position_size:
+                    return None
+                    
+                # 부분 청산 여부 확인
+                if self.partial_liquidation:
+                    liquidation_ratio = min(
+                        self.max_partial_liquidation,
+                        self.risk_manager.calculate_liquidation_ratio(data)
+                    )
+                    position_size = self.position_manager.position_size * liquidation_ratio
+                else:
+                    position_size = self.position_manager.position_size
+                    
+                # 거래 실행
+                exit_price = data['close'] * (1 - slippage)
+                position_value = position_size * exit_price
+                commission_paid = position_value * commission
+                
+                # PnL 계산
+                pnl = self.position_manager.update_pnl(exit_price)
+                
+                return {
+                    'type': 'sell',
+                    'time': data.name,
+                    'price': exit_price,
+                    'amount': position_size,
+                    'leverage': self.position_manager.leverage,
+                    'commission': commission_paid,
+                    'slippage': slippage,
+                    'pnl': pnl,
+                    'position': 'none' if position_size == self.position_manager.position_size else 'partial',
+                    'balance_after': self.position_manager.current_balance - commission_paid
+                }
+                
+        except Exception as e:
+            logger.error(f"거래 실행 시뮬레이션 중 오류 발생: {e}")
+            return None
             
-            # 샤프비율
-            risk_free_rate = 0.02  # 연 2% 무위험 수익률 가정
-            excess_returns = returns - risk_free_rate/252
-            sharpe_ratio = np.sqrt(252) * excess_returns.mean() / excess_returns.std()
+    def _calculate_final_metrics(self, results: Dict[str, Any]) -> Dict[str, Any]:
+        """최종 성과 지표 계산"""
+        try:
+            trades = results['trades']
+            equity_curve = results['equity_curve']
             
-            # 승률
-            winning_trades = len([t for t in self.trades if t['type'] == 'exit' and t['pnl'] > 0])
-            total_trades = len([t for t in self.trades if t['type'] == 'exit'])
+            # 기본 지표
+            total_trades = len(trades)
+            winning_trades = len([t for t in trades if t.get('pnl', 0) > 0])
+            losing_trades = total_trades - winning_trades
             win_rate = winning_trades / total_trades if total_trades > 0 else 0
             
-            # 평균 수익/손실
-            profits = [t['pnl'] for t in self.trades if t['type'] == 'exit' and t['pnl'] > 0]
-            losses = [t['pnl'] for t in self.trades if t['type'] == 'exit' and t['pnl'] < 0]
-            avg_profit = np.mean(profits) if profits else 0
-            avg_loss = np.mean(losses) if losses else 0
+            # 수익률
+            total_return = (equity_curve[-1] - self.initial_balance) / self.initial_balance
+            annualized_return = (1 + total_return) ** (365 / len(equity_curve)) - 1
             
-            # 수익 요인
-            profit_factors = {
-                'crash': len([t for t in self.trades if t.get('reason') == 'crash' and t['pnl'] > 0]),
-                'spike': len([t for t in self.trades if t.get('reason') == 'spike' and t['pnl'] > 0]),
-                'normal': len([t for t in self.trades if t['type'] == 'exit' and t['pnl'] > 0 and not t.get('reason')])
-            }
+            # 리스크 지표
+            returns = pd.Series(equity_curve).pct_change().dropna()
+            volatility = returns.std() * np.sqrt(252)
+            sharpe_ratio = (annualized_return - 0.02) / volatility if volatility > 0 else 0
+            
+            # 드로다운
+            equity_series = pd.Series(equity_curve)
+            rolling_max = equity_series.expanding().max()
+            drawdowns = (equity_series - rolling_max) / rolling_max
+            max_drawdown = drawdowns.min()
+            
+            # 거래 통계
+            avg_trade_pnl = np.mean([t.get('pnl', 0) for t in trades]) if trades else 0
+            avg_winning_trade = np.mean([t.get('pnl', 0) for t in trades if t.get('pnl', 0) > 0]) if winning_trades > 0 else 0
+            avg_losing_trade = np.mean([t.get('pnl', 0) for t in trades if t.get('pnl', 0) < 0]) if losing_trades > 0 else 0
             
             return {
-                'total_return': total_return,
-                'sharpe_ratio': sharpe_ratio,
-                'win_rate': win_rate,
-                'avg_profit': avg_profit,
-                'avg_loss': avg_loss,
                 'total_trades': total_trades,
-                'profit_factors': profit_factors
+                'winning_trades': winning_trades,
+                'losing_trades': losing_trades,
+                'win_rate': win_rate,
+                'total_return': total_return,
+                'annualized_return': annualized_return,
+                'volatility': volatility,
+                'sharpe_ratio': sharpe_ratio,
+                'max_drawdown': max_drawdown,
+                'avg_trade_pnl': avg_trade_pnl,
+                'avg_winning_trade': avg_winning_trade,
+                'avg_losing_trade': avg_losing_trade
             }
             
         except Exception as e:
-            logger.error(f"성과 지표 계산 중 오류 발생: {e}")
+            logger.error(f"최종 성과 지표 계산 중 오류 발생: {e}")
             return {} 
