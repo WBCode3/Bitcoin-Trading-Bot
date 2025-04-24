@@ -394,15 +394,12 @@ class TradingStrategy:
             
             if not side:  # 포지션이 없는 경우
                 # 진입 조건 체크
-                new_side, reason = self.check_entry_conditions(df15, df15.index[-1])
-                if new_side:
+                signal = self.check_entry_conditions(df15, len(df15) - 1)
+                if signal[0]:
                     # 포지션 사이즈 계산
                     position_size = self._calculate_position_size(market_data)
-                    if new_side == 'LONG':
-                        self.exchange.create_order('buy', position_size)
-                    else:
-                        self.exchange.create_order('sell', position_size)
-                    logger.info(f"새로운 포지션 진입: {new_side} {position_size} - 사유: {reason}")
+                    self.exchange.create_order(signal[1], position_size)
+                    logger.info(f"새로운 포지션 진입: {signal[1]} {position_size} - 사유: {signal[1]}")
             
             else:  # 포지션이 있는 경우
                 # 청산 조건 체크

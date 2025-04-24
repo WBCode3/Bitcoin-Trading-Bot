@@ -13,23 +13,35 @@ from core.strategy import TradingStrategy
 from core.market_analyzer import MarketAnalyzer
 
 class BacktestSimulator:
-    def __init__(self, initial_capital: float = 10000.0, risk_manager=None, trading_strategy=None, market_analyzer=None):
-        self.initial_capital = Decimal(str(initial_capital))
-        self.current_capital = self.initial_capital
-        self.positions = []
-        self.trades = []
+    def __init__(self, initial_capital: float = 500000.0):
+        """백테스트 시뮬레이터 초기화"""
+        self.logger = logging.getLogger(__name__)
+        
+        # 초기 설정
+        self.initial_capital = initial_capital
+        self.current_capital = initial_capital
+        self.current_position = None
+        self.trade_history = []
         self.daily_results = []
-        self.max_drawdown = Decimal('0')
-        self.capital_history = []
+        
+        # 리스크 매니저 초기화
+        self.risk_manager = RiskManager()
+        
+        # 성과 지표
+        self.total_trades = 0
+        self.winning_trades = 0
+        self.losing_trades = 0
+        self.max_drawdown = 0.0
+        self.peak_capital = initial_capital
+        
+        self.logger.info("백테스트 시뮬레이터 초기화 완료")
         
         # 컴포넌트 초기화
         self.exchange = Exchange()
-        self.risk_manager = risk_manager if risk_manager else RiskManager()
-        self.strategy = trading_strategy if trading_strategy else TradingStrategy()
-        self.market_analyzer = market_analyzer if market_analyzer else MarketAnalyzer()
+        self.strategy = TradingStrategy()
+        self.market_analyzer = MarketAnalyzer()
         
         # 로거 설정
-        self.logger = logging.getLogger('backtest_simulator')
         self.logger.setLevel(logging.INFO)
         
         # 이미 핸들러가 있는지 확인하고 없으면 추가
@@ -149,65 +161,44 @@ class BacktestSimulator:
             self.logger.error(f"시뮬레이션 실행 중 오류 발생: {e}")
             raise
 
-    def _collect_market_data(self, df: pd.DataFrame, current_index: int) -> Dict[str, Any]:
+    def _collect_market_data(self, df: pd.DataFrame, current_idx: int) -> Dict:
         """시장 데이터 수집"""
         try:
-            if current_index < 100:  # 최소 데이터 포인트 필요
-                return {
-                    'current_price': float(df['close'].iloc[current_index]),
-                    'timestamp': df['timestamp'].iloc[current_index],
-                    'indicators': {},
-                    'analysis': {},
-                    'risk_level': 'medium'
-                }
-                
-            # 과거 데이터 슬라이스
-            historical_data = df.iloc[max(0, current_index-100):current_index+1]
+            # 현재 데이터와 과거 데이터 준비
+            current_row = df.iloc[current_idx]
+            historical_data = df.iloc[max(0, current_idx - 20):current_idx + 1]
             
-            # 현재 가격
-            current_price = float(historical_data['close'].iloc[-1])
-            current_timestamp = historical_data['timestamp'].iloc[-1]
-            
-            # 지표 계산
-            indicators = {
-                'rsi': float(historical_data['rsi'].iloc[-1]),
-                'macd': float(historical_data['macd'].iloc[-1]),
-                'macd_signal': float(historical_data['macd_signal'].iloc[-1]),
-                'bb_upper': float(historical_data['bb_upper'].iloc[-1]),
-                'bb_middle': float(historical_data['bb_middle'].iloc[-1]),
-                'bb_lower': float(historical_data['bb_lower'].iloc[-1]),
-                'stoch_k': float(historical_data['stoch_k'].iloc[-1]),
-                'stoch_d': float(historical_data['stoch_d'].iloc[-1]),
-                'adx': float(historical_data['adx'].iloc[-1]),
-                'volatility': float(historical_data['volatility'].iloc[-1]),
-                'volume': float(historical_data['volume'].iloc[-1]),
-                'volume_ratio': float(historical_data['volume_ratio'].iloc[-1])
+            # 기본 데이터
+            market_data = {
+                'timestamp': current_row.name,
+                'open': float(current_row['open']),
+                'high': float(current_row['high']),
+                'low': float(current_row['low']),
+                'close': float(current_row['close']),
+                'volume': float(current_row['volume'])
             }
             
-            # 시장 분석
-            market_analysis = {
-                'trend': self._analyze_trend(historical_data),
-                'strength': self._analyze_strength(historical_data),
-                'volume': self._analyze_volume(historical_data)
-            }
+            # 기술적 지표
+            if len(historical_data) > 0:
+                market_data.update({
+                    'rsi': float(current_row.get('rsi', 50)),
+                    'macd': float(current_row.get('macd', 0)),
+                    'macd_signal': float(current_row.get('macd_signal', 0)),
+                    'bb_upper': float(current_row.get('bb_upper', market_data['close'])),
+                    'bb_lower': float(current_row.get('bb_lower', market_data['close'])),
+                    'stoch_k': float(current_row.get('stoch_k', 50)),
+                    'stoch_d': float(current_row.get('stoch_d', 50)),
+                    'adx': float(current_row.get('adx', 25)),
+                    'di_plus': float(current_row.get('di_plus', 20)),
+                    'di_minus': float(current_row.get('di_minus', 20)),
+                    'volume_ratio': float(current_row.get('volume_ratio', 1.0))
+                })
             
-            return {
-                'current_price': current_price,
-                'timestamp': current_timestamp,
-                'indicators': indicators,
-                'analysis': market_analysis,
-                'risk_level': self._analyze_risk(indicators)
-            }
+            return market_data
             
         except Exception as e:
             self.logger.error(f"시장 데이터 수집 중 오류 발생: {e}")
-            return {
-                'current_price': float(df['close'].iloc[current_index]),
-                'timestamp': df['timestamp'].iloc[current_index],
-                'indicators': {},
-                'analysis': {},
-                'risk_level': 'medium'
-            }
+            return None
 
     def _analyze_trend(self, data: pd.DataFrame) -> str:
         """추세 분석"""
@@ -264,169 +255,170 @@ class BacktestSimulator:
         except:
             return 'medium'
 
-    def _manage_positions(self, current_data: Dict[str, Any], signal: Dict[str, Any]) -> None:
+    def _manage_positions(self, market_data: Dict, signal: Dict[str, Any]) -> None:
         """포지션 관리"""
         try:
-            # 현재 포지션 확인 및 관리
-            for position in self.positions[:]:  # 리스트 복사본으로 반복
-                # 현재 가격
-                current_price = float(current_data['current_price'])
-                
-                # 포지션 진입가
-                entry_price = float(position['entry_price'])
-                
-                # PNL 계산
-                pnl = (current_price - entry_price) * position['size']
-                if position['side'] == 'short':
-                    pnl = -pnl
-                
-                # 변동성 기반 손절/익절 계산
-                volatility = current_data['indicators'].get('volatility', 0.02)
-                stop_loss = volatility * 2.5  # 변동성의 2.5배
-                take_profit = volatility * 3.0  # 변동성의 3.0배
-                
-                # 최대 드로다운 체크 (더 엄격한 조건)
-                current_drawdown = (self.initial_capital - self.current_capital) / self.initial_capital
-                if current_drawdown > Decimal('0.15'):  # 15% 이상 손실 시 모든 포지션 청산
-                    self._close_position(position, current_data, 'max_drawdown')
-                    continue
-                
-                # 연속 손실 체크 (더 엄격한 조건)
-                if len(self.trades) >= 2:
-                    last_two_trades = self.trades[-2:]
-                    if all(t.get('pnl', 0) < 0 for t in last_two_trades):
-                        self._close_position(position, current_data, 'consecutive_loss')
-                        continue
-                
-                # 손절/익절 체크 (변동성 기반)
-                if pnl < -stop_loss:
-                    self._close_position(position, current_data, 'stop_loss')
-                    continue
-                
-                if pnl > take_profit:
-                    self._close_position(position, current_data, 'take_profit')
-                    continue
+            current_price = market_data['close']
             
-            # 새로운 포지션 진입 검토
-            if signal['action'] != 'hold' and not self.positions:  # 시그널이 있고 현재 포지션이 없을 때
-                # 변동성 기반 포지션 크기 조정
-                volatility = current_data['indicators'].get('volatility', 0.02)
-                base_size = 0.1
+            # 포지션 진입
+            if not self.current_position and signal['action'] in ['buy', 'sell']:
+                position_size, leverage = self.risk_manager.calculate_position_size(
+                    market_data=market_data,
+                    current_price=current_price
+                )
                 
-                # 변동성에 따른 포지션 크기 조정 (더 보수적인 접근)
-                if volatility > 0.03:  # 변동성이 높을 때
-                    position_size = base_size * 0.3
-                elif volatility < 0.01:  # 변동성이 낮을 때
-                    position_size = base_size * 1.2
-                else:
-                    position_size = base_size
+                if position_size > 0:
+                    self.current_position = {
+                        'action': signal['action'],
+                        'size': position_size,
+                        'entry_price': current_price,
+                        'entry_time': market_data['timestamp'],
+                        'leverage': leverage
+                    }
+                    self.logger.info(f"포지션 진입: {signal['action'].upper()} {position_size:.4f} @ {current_price:.2f} (레버리지: {leverage}x)")
+            
+            # 포지션 청산
+            elif self.current_position:
+                # 반대 신호로 인한 청산
+                if signal['action'] != self.current_position['action'] and signal['action'] != 'none':
+                    self._close_position(current_price, "반대 신호")
+                    return
                 
-                # 신뢰도에 따른 포지션 크기 조정
-                confidence = signal.get('confidence', 0.0)
-                position_size *= confidence
+                # 손절/익절 조건 체크
+                unrealized_pnl = (current_price - self.current_position['entry_price']) / self.current_position['entry_price']
+                if self.current_position['action'] == 'sell':
+                    unrealized_pnl = -unrealized_pnl
                 
-                # 레버리지 동적 조정 (더 보수적인 접근)
-                leverage = min(int(8 / (volatility * 100)), 8)  # 최대 8배
+                # 손절 조건
+                if unrealized_pnl < -0.02:  # 2% 손절
+                    self._close_position(current_price, "손절")
+                    return
                 
-                if signal['action'] == 'long':
-                    self._open_position('long', position_size, leverage, float(current_data['current_price']))
-                elif signal['action'] == 'short':
-                    self._open_position('short', position_size, leverage, float(current_data['current_price']))
+                # 익절 조건
+                if unrealized_pnl > 0.03:  # 3% 익절
+                    self._close_position(current_price, "익절")
+                    return
             
         except Exception as e:
             self.logger.error(f"포지션 관리 중 오류 발생: {str(e)}")
+            raise
 
     def _execute_trade(self, market_data: Dict[str, Any], signal: Dict[str, Any]) -> None:
-        """매매 실행"""
+        """거래 실행"""
         try:
-            if not signal:
-                return
-                
-            # 포지션 크기 계산
-            position_size, leverage = self.risk_manager.calculate_position_size(
-                market_data.get('indicators', {}),
-                market_data.get('current_price', 0.0)
-            )
+            current_price = market_data['close']
             
-            # 리스크 한도 체크
-            if not self.risk_manager.check_risk_limits(market_data):
-                self.logger.warning("리스크 한도 초과로 매매 중단")
-                return
-                
-            # 매매 실행
-            if signal['action'] == 'buy':
-                self._open_position('long', position_size, leverage, market_data['current_price'])
-            elif signal['action'] == 'sell':
-                self._open_position('short', position_size, leverage, market_data['current_price'])
+            # 포지션 관리
+            self._manage_positions(market_data, signal)
+            
+            # 일일 결과 기록
+            if self.current_position:
+                pnl = (current_price - self.current_position['entry_price']) * self.current_position['size']
+                self.daily_results.append({
+                    'date': market_data['timestamp'],
+                    'capital': self.current_capital + pnl,
+                    'position': self.current_position['action'],
+                    'size': self.current_position['size'],
+                    'entry_price': self.current_position['entry_price'],
+                    'current_price': current_price,
+                    'pnl': pnl
+                })
+            else:
+                self.daily_results.append({
+                    'date': market_data['timestamp'],
+                    'capital': self.current_capital,
+                    'position': None,
+                    'size': 0,
+                    'entry_price': 0,
+                    'current_price': current_price,
+                    'pnl': 0
+                })
                 
         except Exception as e:
-            self.logger.error(f"매매 실행 중 오류 발생: {e}")
+            self.logger.error(f"거래 실행 중 오류 발생: {e}")
 
-    def _open_position(self, side: str, size: float, leverage: int, price: float) -> None:
-        """포지션 오픈"""
+    def _open_position(self, current_data: Dict, action: str, size: float) -> None:
+        """포지션 진입"""
         try:
+            current_price = current_data['close']
+            
             # 포지션 정보 저장
-            position = {
-                'side': side,
+            self.current_position = {
+                'side': 'long' if action == 'buy' else 'short',
                 'size': size,
-                'leverage': leverage,
-                'entry_price': price,
-                'entry_time': datetime.now()
+                'entry_price': current_price,
+                'entry_time': current_data['timestamp'],
+                'initial_stop_loss': current_price * (0.98 if action == 'buy' else 1.02)  # 2% 손절
             }
             
-            # 포지션 리스트에 추가
-            self.positions.append(position)
-            
             # 거래 기록
-            self.trades.append({
+            trade = {
                 'type': 'open',
-                'side': side,
+                'side': self.current_position['side'],
+                'price': current_price,
                 'size': size,
-                'leverage': leverage,
-                'price': price,
-                'time': datetime.now()
-            })
+                'timestamp': current_data['timestamp']
+            }
+            self.trade_history.append(trade)
             
-            self.logger.info(f"새로운 포지션 오픈: {side} {size} @ {price}")
+            self.logger.info(f"포지션 진입: {action.upper()} {size:.4f} @ {current_price:.2f}")
             
         except Exception as e:
-            self.logger.error(f"포지션 오픈 중 오류 발생: {e}")
+            self.logger.error(f"포지션 진입 중 오류 발생: {e}")
+            raise
 
-    def _close_position(self, position: Dict[str, Any], current_data: Dict[str, Any], reason: str) -> None:
+    def _close_position(self, current_price: float, reason: str) -> None:
         """포지션 청산"""
         try:
+            if not self.current_position:
+                return
+                
             # 수익/손실 계산
-            entry_price = Decimal(str(position['entry_price']))
-            current_price = Decimal(str(current_data['current_price']))
-            position_size = Decimal(str(position['size']))
+            entry_price = self.current_position['entry_price']
+            position_size = self.current_position['size']
+            pnl = (current_price - entry_price) * position_size
             
-            if position['side'] == 'long':
-                pnl = (current_price - entry_price) * position_size
-            else:  # short
-                pnl = (entry_price - current_price) * position_size
+            if self.current_position['action'] == 'sell':
+                pnl = -pnl
+            
+            # 거래 기록
+            trade = {
+                'type': 'close',
+                'action': self.current_position['action'],
+                'entry_price': entry_price,
+                'exit_price': current_price,
+                'size': position_size,
+                'pnl': pnl,
+                'reason': reason,
+                'timestamp': self.current_position['entry_time']
+            }
+            self.trade_history.append(trade)
             
             # 자본금 업데이트
             self.current_capital += pnl
             
-            # 거래 기록 추가
-            trade_record = {
-                'entry_price': float(entry_price),
-                'exit_price': float(current_price),
-                'size': float(position_size),
-                'side': position['side'],
-                'pnl': float(pnl),
-                'reason': reason,
-                'type': 'close'
-            }
-            self.trades.append(trade_record)
+            # 최대 자본금 갱신
+            self.peak_capital = max(self.peak_capital, self.current_capital)
             
-            # 포지션 목록에서 제거
-            self.positions.remove(position)
+            # 최대 낙폭 갱신
+            if self.current_capital < self.peak_capital:
+                drawdown = (self.peak_capital - self.current_capital) / self.peak_capital
+                self.max_drawdown = max(self.max_drawdown, drawdown)
             
-            self.logger.info(f"포지션 청산: {position['side']} {float(position_size)} @ {float(current_price)} (PNL: {float(pnl):.2f})")
+            # 승률 계산
+            self.total_trades += 1
+            if pnl > 0:
+                self.winning_trades += 1
+            else:
+                self.losing_trades += 1
+            
+            self.logger.info(f"포지션 청산: {reason} - PNL: {pnl:.2f}")
+            
+            # 포지션 초기화
+            self.current_position = None
             
         except Exception as e:
-            self.logger.error(f"포지션 청산 중 오류 발생: {str(e)}")
+            self.logger.error(f"포지션 청산 중 오류 발생: {e}")
             raise
             
     def _record_daily_result(self, current_time: datetime):
@@ -462,7 +454,9 @@ class BacktestSimulator:
                 
             # 연간 수익률
             if len(self.daily_results) > 1:
-                days = (self.daily_results[-1]['date'] - self.daily_results[0]['date']).days
+                start_date = pd.to_datetime(self.daily_results[0]['date'])
+                end_date = pd.to_datetime(self.daily_results[-1]['date'])
+                days = (end_date - start_date).days
                 if days > 0:
                     annual_return = (Decimal('1') + total_return) ** (Decimal('365') / Decimal(str(days))) - Decimal('1')
                 else:
@@ -471,7 +465,7 @@ class BacktestSimulator:
                 annual_return = Decimal('0')
                 
             # 승률 계산 수정 (type이 'close'인 거래만 계산)
-            closed_trades = [t for t in self.trades if t.get('type') == 'close']
+            closed_trades = [t for t in self.trade_history if t.get('type') == 'close']
             winning_trades = len([t for t in closed_trades if t.get('pnl', 0) > 0])
             total_trades = len(closed_trades)
             win_rate = Decimal(str(winning_trades)) / Decimal(str(total_trades)) if total_trades > 0 else Decimal('0')
@@ -1011,143 +1005,124 @@ class BacktestSimulator:
             self.logger.error(f"기술적 지표 계산 중 오류 발생: {e}")
             raise
 
-    def _generate_signal(self, market_data: Dict[str, Any]) -> Dict[str, Any]:
-        """트레이딩 시그널 생성"""
+    def _generate_signal(self, current_data: Dict) -> Dict:
+        """거래 신호 생성"""
         try:
-            indicators = market_data.get('indicators', {})
-            if not indicators:
-                return {'action': 'hold', 'reason': '충분한 지표 데이터 없음'}
-
-            # 지표 값 가져오기
-            rsi = indicators.get('rsi', 50)
-            macd = indicators.get('macd', 0)
-            macd_signal = indicators.get('macd_signal', 0)
-            stoch_k = indicators.get('stoch_k', 50)
-            stoch_d = indicators.get('stoch_d', 50)
-            volatility = indicators.get('volatility', 0)
-            volume_ratio = indicators.get('volume_ratio', 1.0)
-            bb_upper = indicators.get('bb_upper', 0)
-            bb_lower = indicators.get('bb_lower', 0)
-            current_price = market_data.get('current_price', 0)
-            adx = indicators.get('adx', 25)
-
-            # 매수 조건 점수 계산
+            reasons = []
             buy_score = 0
-            buy_reasons = []
-            
-            # RSI 과매도 (더 엄격한 조건)
-            if rsi < 30:
-                buy_score += 2
-                buy_reasons.append('RSI 과매도')
-            elif rsi < 40:
-                buy_score += 1
-                buy_reasons.append('RSI 하락')
-            
-            # MACD 상승 (더 엄격한 조건)
-            if macd > macd_signal and macd > 0:
-                buy_score += 2
-                buy_reasons.append('MACD 상승')
-            elif macd > macd_signal:
-                buy_score += 1
-                buy_reasons.append('MACD 전환')
-            
-            # 스토캐스틱 (더 엄격한 조건)
-            if stoch_k < 20 and stoch_k > stoch_d:
-                buy_score += 2
-                buy_reasons.append('스토캐스틱 과매도')
-            elif stoch_k < 30 and stoch_k > stoch_d:
-                buy_score += 1
-                buy_reasons.append('스토캐스틱 상승')
-            
-            # 볼린저 밴드 (더 엄격한 조건)
-            if current_price < bb_lower * 0.98:
-                buy_score += 2
-                buy_reasons.append('볼린저 밴드 하단')
-            elif current_price < bb_lower:
-                buy_score += 1
-                buy_reasons.append('볼린저 밴드 근처')
-            
-            # 거래량 (더 엄격한 조건)
-            if volume_ratio > 1.5:
-                buy_score += 2
-                buy_reasons.append('거래량 급증')
-            elif volume_ratio > 1.2:
-                buy_score += 1
-                buy_reasons.append('거래량 증가')
-            
-            # ADX (추세 강도)
-            if adx > 25:
-                buy_score += 1
-                buy_reasons.append('추세 강함')
-
-            # 매도 조건 점수 계산
             sell_score = 0
-            sell_reasons = []
             
-            # RSI 과매수 (더 엄격한 조건)
-            if rsi > 70:
+            # RSI 조건 (30/70 -> 35/65)
+            if current_data.get('rsi') < 35:
+                buy_score += 2
+                reasons.append("RSI 과매도")
+            elif current_data.get('rsi') > 65:
                 sell_score += 2
-                sell_reasons.append('RSI 과매수')
-            elif rsi > 60:
-                sell_score += 1
-                sell_reasons.append('RSI 상승')
-            
-            # MACD 하락 (더 엄격한 조건)
-            if macd < macd_signal and macd < 0:
+                reasons.append("RSI 과매수")
+                
+            # MACD 조건
+            if current_data.get('macd') > current_data.get('macd_signal', 0):
+                buy_score += 1.5
+                reasons.append("MACD 상승")
+            else:
+                sell_score += 1.5
+                reasons.append("MACD 하락")
+                
+            # 볼린저 밴드 조건
+            if current_data.get('close') < current_data.get('bb_lower', float('inf')):
+                buy_score += 2
+                reasons.append("BB 하단 돌파")
+            elif current_data.get('close') > current_data.get('bb_upper', float('-inf')):
                 sell_score += 2
-                sell_reasons.append('MACD 하락')
-            elif macd < macd_signal:
-                sell_score += 1
-                sell_reasons.append('MACD 전환')
+                reasons.append("BB 상단 돌파")
+                
+            # 거래량 조건
+            volume_ratio = current_data.get('volume_ratio', 1.0)
+            if volume_ratio > 1.2:  # 1.5 -> 1.2
+                if current_data.get('close') > current_data.get('open', 0):
+                    buy_score += 1.5
+                    reasons.append("거래량 증가 + 상승")
+                else:
+                    sell_score += 1.5
+                    reasons.append("거래량 증가 + 하락")
+                    
+            # ADX 조건 (25 -> 20)
+            adx = current_data.get('adx', 0)
+            if adx > 20:
+                if current_data.get('di_plus', 0) > current_data.get('di_minus', 0):
+                    buy_score += 1.5
+                    reasons.append("ADX 강한 상승추세")
+                else:
+                    sell_score += 1.5
+                    reasons.append("ADX 강한 하락추세")
+                    
+            # 스토캐스틱 조건
+            if current_data.get('stoch_k', 0) < 30 and current_data.get('stoch_k', 0) > current_data.get('stoch_d', 0):
+                buy_score += 1.5
+                reasons.append("스토캐스틱 상승반전")
+            elif current_data.get('stoch_k', 0) > 70 and current_data.get('stoch_k', 0) < current_data.get('stoch_d', 0):
+                sell_score += 1.5
+                reasons.append("스토캐스틱 하락반전")
+                
+            # 최소 점수 기준 완화 (6 -> 5)
+            if buy_score >= 5:
+                return {'action': 'buy', 'confidence': buy_score / 10, 'reasons': reasons}
+            elif sell_score >= 5:
+                return {'action': 'sell', 'confidence': sell_score / 10, 'reasons': reasons}
+                
+            return {'action': 'hold', 'confidence': 0, 'reasons': reasons}
             
-            # 스토캐스틱 (더 엄격한 조건)
-            if stoch_k > 80 and stoch_k < stoch_d:
-                sell_score += 2
-                sell_reasons.append('스토캐스틱 과매수')
-            elif stoch_k > 70 and stoch_k < stoch_d:
-                sell_score += 1
-                sell_reasons.append('스토캐스틱 하락')
-            
-            # 볼린저 밴드 (더 엄격한 조건)
-            if current_price > bb_upper * 1.02:
-                sell_score += 2
-                sell_reasons.append('볼린저 밴드 상단')
-            elif current_price > bb_upper:
-                sell_score += 1
-                sell_reasons.append('볼린저 밴드 근처')
-            
-            # 거래량 (더 엄격한 조건)
-            if volume_ratio > 1.5:
-                sell_score += 2
-                sell_reasons.append('거래량 급증')
-            elif volume_ratio > 1.2:
-                sell_score += 1
-                sell_reasons.append('거래량 증가')
-            
-            # ADX (추세 강도)
-            if adx > 25:
-                sell_score += 1
-                sell_reasons.append('추세 강함')
-
-            # 신뢰도 계산 (더 엄격한 기준)
-            confidence = max(buy_score, sell_score) / 10.0
-
-            # 매매 신호 결정 (더 엄격한 조건)
-            if buy_score >= 6:  # 최소 6개 이상의 조건 만족
-                return {
-                    'action': 'long',
-                    'reason': ' + '.join(buy_reasons),
-                    'confidence': confidence
-                }
-            elif sell_score >= 6:
-                return {
-                    'action': 'short',
-                    'reason': ' + '.join(sell_reasons),
-                    'confidence': confidence
-                }
-
-            return {'action': 'hold', 'reason': '조건 불충족', 'confidence': 0.0}
-
         except Exception as e:
-            self.logger.error(f"시그널 생성 중 오류 발생: {e}")
-            return {'action': 'hold', 'reason': f'오류 발생: {str(e)}', 'confidence': 0.0} 
+            self.logger.error(f"거래 신호 생성 중 오류 발생: {e}")
+            return {'action': 'hold', 'confidence': 0, 'reasons': ["오류 발생"]}
+
+    def _run_simulation(self) -> None:
+        """시뮬레이션 실행"""
+        try:
+            self.logger.info("시뮬레이션 시작")
+            
+            # 시장 데이터 준비
+            market_data = self._prepare_market_data()
+            if market_data is None:
+                self.logger.error("시장 데이터 준비 실패")
+                return
+                
+            # 시뮬레이션 기간 설정
+            start_date = market_data.index[0]
+            end_date = market_data.index[-1]
+            self.logger.info(f"시뮬레이션 기간: {start_date} ~ {end_date}")
+            
+            # 초기화
+            self.current_capital = self.initial_capital
+            self.current_position = None
+            self.daily_results = []
+            self.trade_history = []
+            
+            # 시뮬레이션 실행
+            for idx, row in market_data.iterrows():
+                # 현재 시장 데이터
+                current_data = row.to_dict()
+                current_data['name'] = idx
+                
+                # 거래 신호 생성
+                signal = self._generate_signal(current_data)
+                
+                # 거래 실행
+                self._execute_trade(current_data, signal)
+                
+            # 결과 저장
+            self._save_results()
+            
+            self.logger.info("시뮬레이션 완료")
+            
+        except Exception as e:
+            self.logger.error(f"시뮬레이션 실행 중 오류 발생: {e}")
+
+    def _save_results(self):
+        """결과 저장"""
+        try:
+            # 결과 저장 로직
+            pass
+        except Exception as e:
+            self.logger.error(f"결과 저장 중 오류 발생: {e}")
+            raise 

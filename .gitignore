@@ -51,4 +51,64 @@ data/
 
 # OS
 .DS_Store
+Thumbs.db
+
+# 민감한 정보
+*.csv
+*.xlsx
+*.xls
+
+# API 키
+**/api_keys.json
+**/config.json
+
+# 텔레그램 봇 토큰
+**/telegram_token.txt
+
+# 캐시 및 임시 파일
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 가상환경
+.venv/
+.env/
+
+# IDE 설정
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 운영체제 파일
+.DS_Store
+Thumbs.db
+
+# 환경 변수 및 API 키
+*.env
+config/*.json
+config/*.yaml
+
+# 데이터 파일
+data/
+*.csv
+*.xlsx
+*.xls
+
+# 가상환경
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 로그
+*.log
+logs/
+
+# 기타
+.DS_Store
 Thumbs.db 

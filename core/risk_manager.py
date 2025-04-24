@@ -1,4 +1,4 @@
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -36,6 +36,9 @@ class RiskManager:
             'high': 0.03,
             'very_high': 0.05
         }
+        
+        self.max_daily_trades = 5     # 일일 최대 거래 횟수
+        self.consecutive_loss_limit = 3  # 연속 손실 제한
         
         logger.info("리스크 매니저 초기화 완료")
         
@@ -116,28 +119,29 @@ class RiskManager:
     def calculate_position_size(self, market_data: Dict[str, Any], current_price: float) -> Tuple[float, int]:
         """포지션 크기 계산"""
         try:
-            # 기본 포지션 크기
-            base_size = Decimal('0.15')  # 계좌의 15%
+            # 기본 포지션 크기 (계좌의 15%)
+            base_size = self.current_equity * Decimal('0.15')
             
             # 변동성 기반 조정
-            volatility = Decimal(str(market_data.get('volatility', 0.02)))
-            if volatility > Decimal('0.03'):  # 높은 변동성
+            volatility = market_data.get('volatility', 0.02)
+            if volatility > 0.03:  # 높은 변동성
                 base_size *= Decimal('0.8')
-            elif volatility < Decimal('0.01'):  # 낮은 변동성
+            elif volatility < 0.01:  # 낮은 변동성
                 base_size *= Decimal('1.5')
                 
             # 리스크 레벨 기반 조정
-            risk_level = market_data.get('risk_level', 'medium')
-            if risk_level == 'high':
+            if self.risk_level == 'high':
                 base_size *= Decimal('0.8')
-            elif risk_level == 'low':
+            elif self.risk_level == 'low':
                 base_size *= Decimal('1.5')
                 
             # 포지션 크기 제한
-            position_size = max(min(base_size, Decimal(str(self.max_position_size))), Decimal('0.05'))
+            position_size = max(min(base_size / Decimal(str(current_price)), 
+                                 Decimal(str(self.max_position_size))), 
+                             Decimal('0.05'))
             
             # 레버리지 계산
-            leverage = self._calculate_leverage(float(volatility))
+            leverage = self._calculate_leverage(volatility)
             
             return float(position_size), leverage
             
@@ -288,4 +292,40 @@ class RiskManager:
             return 0.0
             
         winning_trades = len([t for t in self.trade_history if t.get('pnl', 0) > 0])
-        return winning_trades / len(self.trade_history) 
+        return winning_trades / len(self.trade_history)
+
+    def can_trade(self, current_capital: float, trade_history: List[Dict]) -> bool:
+        """거래 가능 여부 확인"""
+        try:
+            # 기본 계좌 상태 검증
+            if not self._validate_account_state():
+                return False
+
+            # 일일 거래 횟수 제한 확인
+            current_time = datetime.now()
+            today_start = current_time.replace(hour=0, minute=0, second=0, microsecond=0)
+            
+            today_trades = [trade for trade in trade_history 
+                          if isinstance(trade.get('timestamp'), datetime) and 
+                          trade['timestamp'] >= today_start]
+            
+            if len(today_trades) >= self.max_daily_trades:
+                logger.warning(f"일일 최대 거래 횟수 초과: {len(today_trades)}/{self.max_daily_trades}")
+                return False
+
+            # 연속 손실 제한 확인
+            if self.consecutive_losses >= self.consecutive_loss_limit:
+                logger.warning(f"연속 손실 제한 초과: {self.consecutive_losses}/{self.consecutive_loss_limit}")
+                return False
+
+            # 최소 자본금 확인
+            min_capital = self.initial_capital * Decimal('0.5')  # 초기 자본금의 50%
+            if Decimal(str(current_capital)) < min_capital:
+                logger.warning(f"최소 자본금 미달: {current_capital}/{float(min_capital)}")
+                return False
+
+            return True
+
+        except Exception as e:
+            logger.error(f"거래 가능 여부 확인 중 오류 발생: {str(e)}")
+            return False 
