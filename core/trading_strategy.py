@@ -1,6 +1,24 @@
 from typing import Dict, Any
+from datetime import timedelta
 
 class TradingStrategy:
+    def __init__(self):
+        self.trailing_stop_active = False
+        self.trailing_stop_price = 0.0
+        self.last_optimization = None
+        self.health_check_counter = 0
+        self.last_signal = None
+        self.last_signal_time = None
+        self.min_signal_interval = timedelta(minutes=5)
+        self.consecutive_losses = 0
+        self.max_consecutive_losses = 5
+        self.position_size_multiplier = 1.0  # 풀시드 포지션
+        self.leverage = 50  # 50배 레버리지
+        self.max_leverage = 50  # 최대 레버리지
+        self.min_leverage = 30  # 최소 레버리지
+        self.liquidation_buffer = 0.05  # 청산가 버퍼 5%
+        self.position_mode = 'hedge'
+
     def check_buy_condition(self, market_data: Dict[str, Any]) -> bool:
         """매수 조건 확인"""
         try:

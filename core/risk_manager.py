@@ -12,33 +12,35 @@ logger = logging.getLogger(__name__)
 
 class RiskManager:
     def __init__(self):
+        self.risk_level = 'medium'  # 기본 리스크 레벨
+        self.max_drawdown = 0.5  # 최대 드로다운 50%
+        self.daily_loss_limit = 0.1  # 일일 손실 한도 10%
+        self.position_size = 1.0  # 풀시드 포지션
+        self.leverage = 50  # 50배 레버리지
+        self.min_leverage = 30  # 최소 레버리지
+        self.max_leverage = 50  # 최대 레버리지
+        self.consecutive_losses = 0
+        self.max_consecutive_losses = 5  # 연속 손실 제한
+        self.trade_history = []
+        self.volatility_threshold = 0.02  # 변동성 임계값
+        self.risk_metrics = {
+            'win_rate': 0.0,
+            'avg_win': 0.0,
+            'avg_loss': 0.0,
+            'profit_factor': 0.0
+        }
+        
         self.initial_capital = Decimal('10000.0')  # 기본 초기 자본금
         self.max_daily_loss = 0.1  # 일일 최대 손실 한도 (10%)
-        self.max_drawdown = 0.3    # 최대 드로다운 한도 (30%)
-        self.max_position_size = 0.3  # 최대 포지션 크기 (30%)
-        self.max_leverage = 20.0   # 최대 레버리지 20x
-        self.min_leverage = 5.0    # 최소 레버리지 5x
+        self.max_position_size = 1.0  # 최대 포지션 크기 (100%)
+        self.max_daily_trades = 5     # 일일 최대 거래 횟수
+        self.consecutive_loss_limit = 3  # 연속 손실 제한
         
         self.daily_pnl = 0.0        # 일일 손익
         self.total_pnl = 0.0        # 총 손익
         self.max_equity = 0.0       # 최대 자산
         self.current_equity = self.initial_capital   # 현재 자산
         self.last_reset_time = None # 마지막 리셋 시간
-        
-        self.consecutive_losses = 0  # 연속 손실 횟수
-        self.max_consecutive_losses = 5  # 최대 연속 손실 횟수
-        
-        self.risk_level = 'medium'  # 현재 리스크 레벨
-        self.volatility_thresholds = {
-            'very_low': 0.005,
-            'low': 0.01,
-            'medium': 0.02,
-            'high': 0.03,
-            'very_high': 0.05
-        }
-        
-        self.max_daily_trades = 5     # 일일 최대 거래 횟수
-        self.consecutive_loss_limit = 3  # 연속 손실 제한
         
         logger.info("리스크 매니저 초기화 완료")
         
@@ -93,7 +95,7 @@ class RiskManager:
         """리스크 레벨 업데이트"""
         try:
             # 일일 손실 체크
-            daily_loss_limit = Decimal(str(self.max_daily_loss)) * self.max_equity
+            daily_loss_limit = Decimal(str(self.daily_loss_limit)) * self.max_equity
             if self.daily_pnl <= -daily_loss_limit:
                 self.risk_level = 'very_high'
                 return
@@ -185,7 +187,7 @@ class RiskManager:
                 return False
                 
             # 일일 손실 한도 체크
-            daily_loss_limit = Decimal(str(self.max_daily_loss)) * self.max_equity
+            daily_loss_limit = Decimal(str(self.daily_loss_limit)) * self.max_equity
             if self.daily_pnl <= -daily_loss_limit:
                 logger.warning(f"일일 손실 한도 초과: {self.daily_pnl:.2%}")
                 return False
