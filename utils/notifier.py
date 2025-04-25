@@ -6,8 +6,11 @@ logger = setup_logger(__name__)
 
 class Notifier:
     def __init__(self):
-        self.telegram_enabled = settings.ENABLE_TELEGRAM
-        self.discord_enabled = settings.ENABLE_DISCORD
+        self.telegram_enabled = settings['notification']['telegram']['enabled']
+        self.discord_enabled = settings['notification']['discord']['enabled']
+        self.telegram_token = settings['notification']['telegram']['token']
+        self.telegram_chat_id = settings['notification']['telegram']['chat_id']
+        self.discord_webhook = settings['notification']['discord']['webhook_url']
 
     def send_message(self, message: str) -> None:
         """메시지 전송"""
@@ -26,10 +29,11 @@ class Notifier:
     def _send_telegram(self, message: str) -> None:
         """텔레그램 메시지 전송"""
         try:
-            url = f'https://api.telegram.org/bot{settings.TELEGRAM_TOKEN}/sendMessage'
+            url = f'https://api.telegram.org/bot{self.telegram_token}/sendMessage'
             data = {
-                'chat_id': settings.TELEGRAM_CHAT_ID,
-                'text': message
+                'chat_id': self.telegram_chat_id,
+                'text': message,
+                'parse_mode': 'HTML'
             }
             response = requests.post(url, data=data)
             response.raise_for_status()
@@ -42,7 +46,7 @@ class Notifier:
             data = {
                 'content': message
             }
-            response = requests.post(settings.DISCORD_WEBHOOK, json=data)
+            response = requests.post(self.discord_webhook, json=data)
             response.raise_for_status()
         except Exception as e:
             logger.error(f"디스코드 메시지 전송 실패: {e}") 

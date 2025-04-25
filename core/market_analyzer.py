@@ -2,13 +2,37 @@ import pandas as pd
 import numpy as np
 from typing import Dict, Any, Tuple, List, Optional
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
+from ta.momentum import RSIIndicator
+from ta.volatility import BollingerBands
+from ta.trend import MACD, ADXIndicator
+from ta.volume import VolumeWeightedAveragePrice
+from config.settings import settings
+from utils.logger import setup_logger
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
+@dataclass
+class MarketConfig:
+    rsi_period: int = 14
+    bb_period: int = 20
+    bb_std: int = 2
+    macd_fast: int = 12
+    macd_slow: int = 26
+    macd_signal: int = 9
+    adx_period: int = 14
+    vwap_period: int = 20
+    volatility_threshold: float = 0.02
+    volume_threshold: float = 1.5
+
 class MarketAnalyzer:
-    def __init__(self):
+    def __init__(self, config: MarketConfig = None):
+        self.config = config or MarketConfig()
+        self.logger = logging.getLogger(__name__)
+        self._indicators_cache = {}
+        self._last_calculation_time = None
         self.volatility_thresholds = {
             'very_low': 0.005,
             'low': 0.01,
@@ -41,8 +65,7 @@ class MarketAnalyzer:
         self.stoch_params = {'k': 14, 'd': 3, 'smooth': 3}
         self.adx_period = 14
         self.min_data_points = 100  # 최소 필요한 데이터 포인트 수
-        self.logger = logging.getLogger(__name__)
-        
+
     def _validate_data(self, df: pd.DataFrame) -> bool:
         """데이터 유효성 검증"""
         try:
@@ -69,73 +92,174 @@ class MarketAnalyzer:
         except Exception:
             return False
 
-    def analyze_market_condition(self, market_data: Dict[str, Any]) -> Dict[str, Any]:
-        """시장 상태 분석"""
+    def analyze_market_condition(self, df: pd.DataFrame) -> Dict[str, Any]:
+        """시장 상태 분석 (캐싱 적용)"""
         try:
-            if not market_data or not isinstance(market_data, dict):
-                return None
-                
-            current_price = Decimal(str(market_data.get('current_price', 0)))
-            indicators = market_data.get('indicators', {})
+            current_time = datetime.now()
+            cache_key = f"{df.index[-1]}_{len(df)}"
             
-            # 변동성 분석
-            volatility = self._analyze_volatility(indicators)
-            
-            # 추세 분석
-            trend = self._analyze_trend(indicators)
-            
-            # 모멘텀 분석
-            momentum = self.analyze_momentum(market_data['close'])
-            
-            # 리스크 레벨 평가
-            risk_level = self._evaluate_risk_level(volatility, trend, momentum['state'])
-            
-            return {
-                'volatility': volatility,
-                'trend': trend,
-                'momentum': momentum,
-                'risk_level': risk_level
-            }
-            
-        except Exception as e:
-            self.logger.error(f"시장 상태 분석 중 오류 발생: {e}")
-            return None
+            # 캐시된 결과가 있고 5분 이내라면 재사용
+            if (cache_key in self._indicators_cache and 
+                self._last_calculation_time and 
+                (current_time - self._last_calculation_time) < timedelta(minutes=5)):
+                return self._indicators_cache[cache_key]
 
-    def calculate_volatility(self, data: pd.DataFrame) -> float:
-        """변동성 계산"""
-        try:
-            if len(data) < 2:
-                logger.warning("데이터가 충분하지 않아 기본 변동성 값을 사용합니다.")
-                return 0.02  # 2% 기본값
-            
-            # 종가 기반 수익률 계산
-            returns = data['close'].pct_change().dropna()
-            
-            if len(returns) < 2:
-                logger.warning("유효한 수익률 데이터가 부족하여 기본 변동성 값을 사용합니다.")
-                return 0.02
-            
-            # 이상치 제거 (3 표준편차 이상)
-            std = returns.std()
-            mean = returns.mean()
-            returns = returns[(returns > mean - 3*std) & (returns < mean + 3*std)]
-            
-            if len(returns) < 2:
-                logger.warning("이상치 제거 후 유효한 데이터가 부족하여 기본 변동성 값을 사용합니다.")
-                return 0.02
-            
-            # 연간화된 변동성 계산
-            volatility = returns.std() * np.sqrt(252)  # 252는 연간 거래일 수
-            
-            if np.isnan(volatility) or volatility <= 0:
-                logger.warning("유효하지 않은 변동성 값이 계산되어 기본값을 사용합니다.")
-                return 0.02
-            
-            return float(volatility)
+            analysis = self._analyze_all_indicators(df)
+            self._indicators_cache[cache_key] = analysis
+            self._last_calculation_time = current_time
+            return analysis
             
         except Exception as e:
-            logger.error(f"변동성 계산 중 오류 발생: {e}")
-            return 0.02
+            self.logger.error(f"시장 분석 실패: {e}")
+            return self._get_default_analysis()
+
+    def _analyze_all_indicators(self, df: pd.DataFrame) -> Dict[str, Any]:
+        """모든 기술적 지표 분석"""
+        # RSI
+        rsi = RSIIndicator(df['close'], window=self.config.rsi_period).rsi().iloc[-1]
+        
+        # 볼린저 밴드
+        bb = BollingerBands(df['close'], window=self.config.bb_period, window_dev=self.config.bb_std)
+        bb_upper = bb.bollinger_hband().iloc[-1]
+        bb_lower = bb.bollinger_lband().iloc[-1]
+        bb_middle = bb.bollinger_mavg().iloc[-1]
+        
+        # MACD
+        macd_indicator = MACD(
+            df['close'],
+            window_slow=self.config.macd_slow,
+            window_fast=self.config.macd_fast,
+            window_sign=self.config.macd_signal
+        )
+        macd = macd_indicator.macd().iloc[-1]
+        macd_signal = macd_indicator.macd_signal().iloc[-1]
+        macd_hist = macd_indicator.macd_diff().iloc[-1]
+        
+        # ADX
+        adx = ADXIndicator(
+            df['high'],
+            df['low'],
+            df['close'],
+            window=self.config.adx_period
+        )
+        adx_value = adx.adx().iloc[-1]
+        
+        # VWAP
+        vwap = VolumeWeightedAveragePrice(
+            df['high'],
+            df['low'],
+            df['close'],
+            df['volume'],
+            window=self.config.vwap_period
+        ).volume_weighted_average_price().iloc[-1]
+        
+        # 변동성
+        volatility = self.calculate_volatility(df)
+        
+        # 거래량
+        volume = df['volume'].iloc[-1]
+        volume_ma = df['volume'].rolling(window=20).mean().iloc[-1]
+        volume_ratio = volume / volume_ma if volume_ma > 0 else 1.0
+        
+        return {
+            'rsi': {
+                'value': rsi,
+                'state': 'oversold' if rsi < 30 else 'overbought' if rsi > 70 else 'normal'
+            },
+            'bollinger': {
+                'upper': bb_upper,
+                'lower': bb_lower,
+                'middle': bb_middle,
+                'state': 'overbought' if df['close'].iloc[-1] > bb_upper else 'oversold' if df['close'].iloc[-1] < bb_lower else 'normal'
+            },
+            'macd': {
+                'value': macd,
+                'signal': macd_signal,
+                'histogram': macd_hist,
+                'state': 'bullish' if macd_hist > 0 else 'bearish'
+            },
+            'adx': {
+                'value': adx_value,
+                'state': 'strong' if adx_value > 25 else 'weak'
+            },
+            'vwap': vwap,
+            'volatility': volatility,
+            'volume': {
+                'current': volume,
+                'ma': volume_ma,
+                'ratio': volume_ratio,
+                'state': 'high' if volume_ratio > self.config.volume_threshold else 'normal'
+            }
+        }
+
+    def _get_default_analysis(self) -> Dict[str, Any]:
+        """기본 분석 결과 반환"""
+        return {
+            'rsi': {'value': 50, 'state': 'normal'},
+            'bollinger': {'upper': 0, 'lower': 0, 'middle': 0, 'state': 'normal'},
+            'macd': {'value': 0, 'signal': 0, 'histogram': 0, 'state': 'neutral'},
+            'adx': {'value': 25, 'state': 'weak'},
+            'vwap': 0,
+            'volatility': 0.02,
+            'volume': {'current': 0, 'ma': 0, 'ratio': 1.0, 'state': 'normal'}
+        }
+
+    def calculate_volatility(self, df: pd.DataFrame) -> float:
+        """변동성 계산 (ATR 기반)"""
+        try:
+            high = df['high']
+            low = df['low']
+            close = df['close']
+            
+            # ATR 계산
+            tr1 = high - low
+            tr2 = abs(high - close.shift())
+            tr3 = abs(low - close.shift())
+            tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+            atr = tr.rolling(window=14).mean().iloc[-1]
+            
+            # 변동성 비율 계산
+            volatility = atr / close.iloc[-1]
+            
+            return volatility
+            
+        except Exception as e:
+            self.logger.error(f"변동성 계산 실패: {e}")
+            return self.config.volatility_threshold
+
+    def check_market_health(self, analysis: Dict[str, Any]) -> bool:
+        """시장 상태 건강성 검사"""
+        try:
+            # RSI 검사
+            rsi = analysis['rsi']['value']
+            if rsi < 20 or rsi > 80:  # 극단적인 과매수/과매도
+                return False
+            
+            # 볼린저 밴드 검사
+            bb_state = analysis['bollinger']['state']
+            if bb_state == 'overbought' or bb_state == 'oversold':
+                return False
+            
+            # ADX 검사
+            adx = analysis['adx']['value']
+            if adx > 50:  # 너무 강한 추세
+                return False
+            
+            # 거래량 검사
+            volume_ratio = analysis['volume']['ratio']
+            if volume_ratio > 3.0:  # 비정상적인 거래량
+                return False
+            
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"시장 상태 검사 실패: {e}")
+            return False
+
+    def reset(self):
+        """분석기 초기화"""
+        self._indicators_cache.clear()
+        self._last_calculation_time = None
 
     def analyze_trend(self, df: pd.DataFrame) -> Optional[Dict[str, Any]]:
         """트렌드 분석"""
@@ -320,7 +444,7 @@ class MarketAnalyzer:
         """볼린저 밴드 계산"""
         try:
             if len(data) < period:
-                logger.warning(f"데이터가 충분하지 않습니다. 최소 {period}개의 데이터 포인트가 필요합니다.")
+                logger.warning("볼린저 밴드 계산을 위한 데이터가 부족합니다.")
                 return {
                     'middle': pd.Series([data['close'].iloc[-1]] * len(data), index=data.index),
                     'upper': pd.Series([data['close'].iloc[-1]] * len(data), index=data.index),
@@ -332,7 +456,7 @@ class MarketAnalyzer:
             
             # NaN 값 처리
             if close.isnull().any():
-                close = close.fillna(method='ffill').fillna(method='bfill')
+                close = close.ffill().bfill()
                 logger.warning("종가 데이터에 NaN 값이 존재하여 전진/후진 채움을 수행했습니다.")
 
             # 중간 밴드 (SMA) 계산
@@ -345,20 +469,16 @@ class MarketAnalyzer:
             upper = middle + (std_dev * std)
             lower = middle - (std_dev * std)
             
-            # 결과 딕셔너리 생성
-            result = {
+            # NaN 값 처리
+            middle = middle.ffill().bfill()
+            upper = upper.ffill().bfill()
+            lower = lower.ffill().bfill()
+            
+            return {
                 'middle': middle,
                 'upper': upper,
                 'lower': lower
             }
-            
-            # NaN 값이 있는지 확인
-            for key, value in result.items():
-                if value.isnull().any():
-                    logger.warning(f"{key} 밴드에 NaN 값이 존재합니다.")
-                    result[key] = value.fillna(method='ffill').fillna(method='bfill')
-            
-            return result
             
         except Exception as e:
             logger.error(f"볼린저 밴드 계산 중 오류 발생: {e}")
