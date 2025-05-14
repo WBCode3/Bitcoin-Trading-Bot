@@ -198,32 +198,27 @@ class Exchange:
             self.logger.error(f"주문 취소 실패: {e}")
             return False
 
-    async def get_ohlcv(self, symbol: str = None, interval: str = None, limit: int = 100) -> List[List[Any]]:
+    def get_ohlcv(self, symbol: str = None, interval: str = None, limit: int = 100) -> List[List[Any]]:
         """OHLCV 데이터 조회"""
         try:
             symbol = symbol or self.symbol
             interval = interval or self.interval
-            
             # 인터벌 검증
             valid_intervals = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d', '3d', '1w', '1M']
             if interval not in valid_intervals:
                 interval = '1m'
-            
             # 심볼 검증
             if not isinstance(symbol, str) or not symbol:
                 symbol = 'BTCUSDT'
             elif '/' in symbol:
                 symbol = symbol.replace('/', '')
-            
             klines = self.client.futures_klines(
                 symbol=symbol,
                 interval=interval,
                 limit=limit
             )
-            
             if not klines:
                 return []
-            
             # 데이터 형식 변환
             formatted_klines = []
             for k in klines:
@@ -238,12 +233,9 @@ class Exchange:
                     ])
                 except (ValueError, IndexError):
                     continue
-            
             if not formatted_klines:
                 return []
-                
             return formatted_klines
-            
         except BinanceAPIException as e:
             self.logger.error(f"OHLCV 데이터 조회 중 오류 발생: {e}")
             return []
@@ -278,7 +270,7 @@ class Exchange:
                     raise e
                     
             # 레버리지 설정
-            self.set_leverage(1)  # 기본 레버리지 1x
+            self.set_leverage(30)  # 30x
             
             return True
             
@@ -286,41 +278,36 @@ class Exchange:
             self.logger.error(f"거래소 설정 중 오류 발생: {e}")
             return False
 
-    def set_leverage(self, leverage: int) -> None:
+    def set_leverage(self, leverage: int = 30) -> bool:
         """레버리지 설정"""
         try:
             self.client.futures_change_leverage(symbol=self.symbol, leverage=leverage)
             self.logger.info(f"레버리지 설정 완료: {leverage}x")
+            return True
         except Exception as e:
-            logger.error(f"레버리지 설정 중 오류 발생: {e}")
-            raise
+            self.logger.error(f"레버리지 설정 실패: {e}")
+            return False
 
-    async def get_historical_data(self, start_date: str, end_date: str) -> pd.DataFrame:
+    def get_historical_data(self, start_date: str, end_date: str) -> pd.DataFrame:
         """히스토리컬 데이터 조회 (시뮬레이션용 테스트 데이터 생성)"""
         try:
             # 시작일과 종료일 파싱
             start = pd.to_datetime(start_date)
             end = pd.to_datetime(end_date)
-            
             # 날짜 범위 생성 (1분 간격)
             dates = pd.date_range(start=start, end=end, freq='1min')
-            
             # 기본 가격 설정
             base_price = 90000.0
-            
             # 가격 변동 시뮬레이션
             np.random.seed(42)  # 재현성을 위한 시드 설정
             returns = np.random.normal(0.0001, 0.002, size=len(dates))  # 평균 수익률과 변동성 조정
             price_multipliers = np.exp(np.cumsum(returns))
-            
             # 가격 데이터 생성
             prices = base_price * price_multipliers
             high_prices = prices * (1 + np.random.uniform(0, 0.003, size=len(dates)))
             low_prices = prices * (1 - np.random.uniform(0, 0.003, size=len(dates)))
-            
             # 거래량 생성
             volumes = np.random.lognormal(10, 1, size=len(dates))
-            
             # DataFrame 생성
             df = pd.DataFrame({
                 'open': prices,
@@ -329,43 +316,34 @@ class Exchange:
                 'close': prices,
                 'volume': volumes
             }, index=dates)
-            
             return df
-            
         except Exception as e:
             logger.error(f"히스토리컬 데이터 생성 중 오류 발생: {e}")
             return pd.DataFrame()
 
-    async def get_market_data(self) -> Dict[str, Any]:
+    def get_market_data(self) -> Dict[str, Any]:
         """현재 시장 데이터 조회"""
         try:
             # OHLCV 데이터 조회
-            klines = await self.get_ohlcv(limit=100)
+            klines = self.get_ohlcv(limit=100)
             if not klines:
                 raise Exception("OHLCV 데이터 조회 실패")
-
             # OHLCV 데이터를 DataFrame으로 변환
             df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
             df.set_index('timestamp', inplace=True)
-
             # 현재가 조회
             ticker = self.client.futures_symbol_ticker(symbol=self.symbol)
             current_price = float(ticker['price'])
-
             # 24시간 변동성
             ticker_24h = self.client.futures_ticker(symbol=self.symbol)
             price_change_24h = float(ticker_24h['priceChangePercent'])
-
             # 거래량
             volume_24h = float(ticker_24h['volume'])
-
             # 포지션 정보
             position = self.get_position()
-
             # 잔고 정보
             balance = self.get_balance()
-
             # 데이터 정리
             market_data = {
                 'timestamp': datetime.now(),
@@ -377,9 +355,7 @@ class Exchange:
                 'position': position,
                 'balance': balance
             }
-
             return market_data
-
         except Exception as e:
             logger.error(f"시장 데이터 조회 중 오류 발생: {e}")
             raise

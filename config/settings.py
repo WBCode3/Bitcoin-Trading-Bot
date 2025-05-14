@@ -7,7 +7,7 @@ load_dotenv()
 # 트레이딩 설정
 TRADING_CONFIG = {
     'initial_capital': None,  # 실제 계좌 잔고 사용
-    'leverage': 5,  # 레버리지 (5배)
+    'leverage': 30,  # 레버리지 (30배)
     'fee': 0.00032,  # BNB 20% 할인 적용된 수수료
     'position_size': 0.5,  # 포지션 크기 (계좌의 50%)
     'stop_loss': 0.02,  # 손절 비율

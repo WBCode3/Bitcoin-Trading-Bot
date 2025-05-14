@@ -47,6 +47,8 @@ class TradingStrategy:
         self.logger = setup_logger('strategy')
         self._indicators_cache = {}
         self._last_calculation_time = None
+        self.peak_profit = 0.0  # 최고 수익률 초기화
+        self.first_target_hit = False  # 1차 청산 상태 초기화
 
     def calculate_indicators(self, df: pd.DataFrame) -> Dict[str, Any]:
         """기술적 지표 계산 (캐싱 적용)"""
@@ -318,6 +320,8 @@ class TradingStrategy:
         self.consecutive_losses = 0
         self._indicators_cache.clear()
         self._last_calculation_time = None
+        self.peak_profit = 0.0  # 최고 수익률 초기화
+        self.first_target_hit = False  # 1차 청산 상태 초기화
 
     def _calculate_fibonacci_levels(self, df: pd.DataFrame) -> Dict[str, float]:
         """피보나치 레벨 계산"""
@@ -379,212 +383,77 @@ class TradingStrategy:
             logger.error(f"스파이크 감지 실패: {e}")
             return False
 
-    def check_entry_conditions(self, df15: pd.DataFrame, df5: pd.DataFrame, df1h: pd.DataFrame, current_idx: int) -> Tuple[bool, str]:
-        """진입 조건 확인 (멀티 타임프레임)"""
+    def check_entry_conditions(self, indicators: Dict[str, Any]) -> bool:
+        """진입 조건 확인"""
         try:
-            # 1시간봉 데이터
-            current_price_1h = df1h['close'].iloc[-1]
-            rsi_1h = df1h['rsi'].iloc[-1]
-            macd_1h = df1h['macd'].iloc[-1]
-            macd_signal_1h = df1h['macd_signal'].iloc[-1]
-            macd_hist_1h = df1h['macd_hist'].iloc[-1]
-            stoch_k_1h = df1h['stoch_k'].iloc[-1]
-            stoch_d_1h = df1h['stoch_d'].iloc[-1]
-            bb_high_1h = df1h['bb_high'].iloc[-1]
-            bb_low_1h = df1h['bb_low'].iloc[-1]
-            atr_1h = df1h['atr'].iloc[-1]
-            atr_14_1h = df1h['atr'].iloc[-14:].mean()
-            atr_ema_1h = df1h['atr'].iloc[-10:].ewm(span=10).mean().iloc[-1]
-            volume_1h = df1h['volume'].iloc[-1]
-            volume_ma_1h = df1h['volume'].iloc[-20:-1].mean()
-            adx_1h = df1h['adx'].iloc[-1]
+            # 1. ADX 기반 추세 확인 (ADX >= 25)
+            adx = indicators['adx'].iloc[-1]
+            if adx < 25:
+                self.logger.info(f"ADX {adx:.2f} < 25: 추세가 약함")
+                return False
+                
+            # 2. RSI + MACD 조합으로 방향 결정
+            rsi = indicators['rsi'].iloc[-1]
+            macd = indicators['macd'].iloc[-1]
+            macd_signal = indicators['macd_signal'].iloc[-1]
+            macd_hist = indicators['macd_hist'].iloc[-1]
             
-            # 15분봉 데이터
-            current_price_15 = df15['close'].iloc[current_idx]
-            rsi_15 = df15['rsi'].iloc[current_idx]
-            macd_15 = df15['macd'].iloc[current_idx]
-            macd_signal_15 = df15['macd_signal'].iloc[current_idx]
-            macd_hist_15 = df15['macd_hist'].iloc[current_idx]
-            stoch_k_15 = df15['stoch_k'].iloc[current_idx]
-            stoch_d_15 = df15['stoch_d'].iloc[current_idx]
-            bb_high_15 = df15['bb_high'].iloc[current_idx]
-            bb_low_15 = df15['bb_low'].iloc[current_idx]
-            atr_15 = df15['atr'].iloc[current_idx]
-            atr_14_15 = df15['atr'].iloc[current_idx-14:current_idx].mean()
-            atr_ema_15 = df15['atr'].iloc[current_idx-10:current_idx].ewm(span=10).mean().iloc[-1]
-            volume_15 = df15['volume'].iloc[current_idx]
-            volume_ma_15 = df15['volume'].iloc[current_idx-20:current_idx].mean()
-            adx_15 = df15['adx'].iloc[current_idx]
-            
-            # 5분봉 데이터
-            current_price_5 = df5['close'].iloc[-1]
-            rsi_5 = df5['rsi'].iloc[-1]
-            macd_5 = df5['macd'].iloc[-1]
-            macd_signal_5 = df5['macd_signal'].iloc[-1]
-            macd_hist_5 = df5['macd_hist'].iloc[-1]
-            stoch_k_5 = df5['stoch_k'].iloc[-1]
-            stoch_d_5 = df5['stoch_d'].iloc[-1]
-            bb_high_5 = df5['bb_high'].iloc[-1]
-            bb_low_5 = df5['bb_low'].iloc[-1]
-            atr_5 = df5['atr'].iloc[-1]
-            atr_14_5 = df5['atr'].iloc[-14:].mean()
-            atr_ema_5 = df5['atr'].iloc[-10:].ewm(span=10).mean().iloc[-1]
-            volume_5 = df5['volume'].iloc[-1]
-            volume_ma_5 = df5['volume'].iloc[-20:-1].mean()
-            adx_5 = df5['adx'].iloc[-1]
-            
-            # 시장 레짐 필터 (ADX 기반)
-            # 1. 횡보장 필터 (ADX < 20)
-            if adx_1h < 20 or adx_15 < 20 or adx_5 < 20:
-                self.logger.info("횡보장 감지: 거래 금지")
-                return False, ""
-            
-            # 2. 강추세 필터 (ADX ≥ 35)
-            if adx_1h < 35 or adx_15 < 35 or adx_5 < 35:
-                self.logger.info("강추세 미달: 거래 금지")
-                return False, ""
-            
-            # MACD 히스토그램 3봉 확인 (1시간봉)
-            macd_hist_prev_1h = df1h['macd_hist'].iloc[-2]
-            macd_hist_prev2_1h = df1h['macd_hist'].iloc[-3]
-            macd_hist_prev3_1h = df1h['macd_hist'].iloc[-4]
-            
-            # MACD 히스토그램 3봉 확인 (15분봉)
-            macd_hist_prev_15 = df15['macd_hist'].iloc[current_idx-1]
-            macd_hist_prev2_15 = df15['macd_hist'].iloc[current_idx-2]
-            macd_hist_prev3_15 = df15['macd_hist'].iloc[current_idx-3]
-            
-            # MACD 히스토그램 3봉 확인 (5분봉)
-            macd_hist_prev_5 = df5['macd_hist'].iloc[-2]
-            macd_hist_prev2_5 = df5['macd_hist'].iloc[-3]
-            macd_hist_prev3_5 = df5['macd_hist'].iloc[-4]
-            
-            # 스토캐스틱 연속 교차 확인 (1시간봉)
-            stoch_k_prev_1h = df1h['stoch_k'].iloc[-2]
-            stoch_d_prev_1h = df1h['stoch_d'].iloc[-2]
-            stoch_k_prev2_1h = df1h['stoch_k'].iloc[-3]
-            stoch_d_prev2_1h = df1h['stoch_d'].iloc[-3]
-            stoch_k_prev3_1h = df1h['stoch_k'].iloc[-4]
-            stoch_d_prev3_1h = df1h['stoch_d'].iloc[-4]
-            
-            # 스토캐스틱 연속 교차 확인 (15분봉)
-            stoch_k_prev_15 = df15['stoch_k'].iloc[current_idx-1]
-            stoch_d_prev_15 = df15['stoch_d'].iloc[current_idx-1]
-            stoch_k_prev2_15 = df15['stoch_k'].iloc[current_idx-2]
-            stoch_d_prev2_15 = df15['stoch_d'].iloc[current_idx-2]
-            stoch_k_prev3_15 = df15['stoch_k'].iloc[current_idx-3]
-            stoch_d_prev3_15 = df15['stoch_d'].iloc[current_idx-3]
-            
-            # 스토캐스틱 연속 교차 확인 (5분봉)
-            stoch_k_prev_5 = df5['stoch_k'].iloc[-2]
-            stoch_d_prev_5 = df5['stoch_d'].iloc[-2]
-            stoch_k_prev2_5 = df5['stoch_k'].iloc[-3]
-            stoch_d_prev2_5 = df5['stoch_d'].iloc[-3]
-            stoch_k_prev3_5 = df5['stoch_k'].iloc[-4]
-            stoch_d_prev3_5 = df5['stoch_d'].iloc[-4]
-            
-            # 롱 포지션 진입 조건 (1시간봉)
-            long_conditions_1h = [
-                rsi_1h < 25,  # RSI 기준 강화
-                macd_hist_1h > 0 and macd_hist_prev_1h > 0 and macd_hist_prev2_1h > 0 and macd_hist_prev3_1h > 0,  # 4봉 연속 양수
-                stoch_k_1h > stoch_d_1h and stoch_k_prev_1h > stoch_d_prev_1h and stoch_k_prev2_1h > stoch_d_prev2_1h and stoch_k_prev3_1h > stoch_d_prev3_1h,  # 4봉 연속 교차
-                atr_14_1h > atr_ema_1h * 1.3,  # ATR 필터 변경
-                current_price_1h < bb_low_1h and (bb_low_1h - current_price_1h) / bb_low_1h > 0.01,  # 볼린저 밴드 이탈 기준 강화
-                volume_1h > volume_ma_1h * 1.5  # 거래량 기준 강화
-            ]
-            
-            # 롱 포지션 진입 조건 (15분봉)
-            long_conditions_15 = [
-                rsi_15 < 25,  # RSI 기준 강화
-                macd_hist_15 > 0 and macd_hist_prev_15 > 0 and macd_hist_prev2_15 > 0 and macd_hist_prev3_15 > 0,  # 4봉 연속 양수
-                stoch_k_15 > stoch_d_15 and stoch_k_prev_15 > stoch_d_prev_15 and stoch_k_prev2_15 > stoch_d_prev2_15 and stoch_k_prev3_15 > stoch_d_prev3_15,  # 4봉 연속 교차
-                atr_14_15 > atr_ema_15 * 1.3,  # ATR 필터 변경
-                current_price_15 < bb_low_15 and (bb_low_15 - current_price_15) / bb_low_15 > 0.01,  # 볼린저 밴드 이탈 기준 강화
-                volume_15 > volume_ma_15 * 1.5  # 거래량 기준 강화
-            ]
-            
-            # 롱 포지션 진입 조건 (5분봉)
-            long_conditions_5 = [
-                rsi_5 < 25,  # RSI 기준 강화
-                macd_hist_5 > 0 and macd_hist_prev_5 > 0 and macd_hist_prev2_5 > 0 and macd_hist_prev3_5 > 0,  # 4봉 연속 양수
-                stoch_k_5 > stoch_d_5 and stoch_k_prev_5 > stoch_d_prev_5 and stoch_k_prev2_5 > stoch_d_prev2_5 and stoch_k_prev3_5 > stoch_d_prev3_5,  # 4봉 연속 교차
-                atr_14_5 > atr_ema_5 * 1.3,  # ATR 필터 변경
-                current_price_5 < bb_low_5 and (bb_low_5 - current_price_5) / bb_low_5 > 0.01,  # 볼린저 밴드 이탈 기준 강화
-                volume_5 > volume_ma_5 * 1.5  # 거래량 기준 강화
-            ]
-            
-            # 숏 포지션 진입 조건 (1시간봉)
-            short_conditions_1h = [
-                rsi_1h > 75,  # RSI 기준 강화
-                macd_hist_1h < 0 and macd_hist_prev_1h < 0 and macd_hist_prev2_1h < 0 and macd_hist_prev3_1h < 0,  # 4봉 연속 음수
-                stoch_k_1h < stoch_d_1h and stoch_k_prev_1h < stoch_d_prev_1h and stoch_k_prev2_1h < stoch_d_prev2_1h and stoch_k_prev3_1h < stoch_d_prev3_1h,  # 4봉 연속 교차
-                atr_14_1h > atr_ema_1h * 1.3,  # ATR 필터 변경
-                current_price_1h > bb_high_1h and (current_price_1h - bb_high_1h) / bb_high_1h > 0.01,  # 볼린저 밴드 이탈 기준 강화
-                volume_1h > volume_ma_1h * 1.5  # 거래량 기준 강화
-            ]
-            
-            # 숏 포지션 진입 조건 (15분봉)
-            short_conditions_15 = [
-                rsi_15 > 75,  # RSI 기준 강화
-                macd_hist_15 < 0 and macd_hist_prev_15 < 0 and macd_hist_prev2_15 < 0 and macd_hist_prev3_15 < 0,  # 4봉 연속 음수
-                stoch_k_15 < stoch_d_15 and stoch_k_prev_15 < stoch_d_prev_15 and stoch_k_prev2_15 < stoch_d_prev2_15 and stoch_k_prev3_15 < stoch_d_prev3_15,  # 4봉 연속 교차
-                atr_14_15 > atr_ema_15 * 1.3,  # ATR 필터 변경
-                current_price_15 > bb_high_15 and (current_price_15 - bb_high_15) / bb_high_15 > 0.01,  # 볼린저 밴드 이탈 기준 강화
-                volume_15 > volume_ma_15 * 1.5  # 거래량 기준 강화
-            ]
-            
-            # 숏 포지션 진입 조건 (5분봉)
-            short_conditions_5 = [
-                rsi_5 > 75,  # RSI 기준 강화
-                macd_hist_5 < 0 and macd_hist_prev_5 < 0 and macd_hist_prev2_5 < 0 and macd_hist_prev3_5 < 0,  # 4봉 연속 음수
-                stoch_k_5 < stoch_d_5 and stoch_k_prev_5 < stoch_d_prev_5 and stoch_k_prev2_5 < stoch_d_prev2_5 and stoch_k_prev3_5 < stoch_d_prev3_5,  # 4봉 연속 교차
-                atr_14_5 > atr_ema_5 * 1.3,  # ATR 필터 변경
-                current_price_5 > bb_high_5 and (current_price_5 - bb_high_5) / bb_high_5 > 0.01,  # 볼린저 밴드 이탈 기준 강화
-                volume_5 > volume_ma_5 * 1.5  # 거래량 기준 강화
-            ]
-            
-            # 롱 진입 (세 타임프레임 모두 조건 충족)
-            if all(long_conditions_1h) and all(long_conditions_15) and all(long_conditions_5):
-                self.logger.info("롱 진입 조건 충족 (1시간, 15분, 5분)")
-                return True, "LONG"
-            
-            # 숏 진입 (세 타임프레임 모두 조건 충족)
-            if all(short_conditions_1h) and all(short_conditions_15) and all(short_conditions_5):
-                self.logger.info("숏 진입 조건 충족 (1시간, 15분, 5분)")
-                return True, "SHORT"
-            
-            return False, ""
+            # 롱 포지션 조건
+            if (rsi < 30 and  # RSI 과매도
+                macd > macd_signal and  # MACD 상향 돌파
+                macd_hist > 0):  # MACD 히스토그램 양수
+                
+                self.logger.info(f"롱 진입 신호 발생:")
+                self.logger.info(f"- ADX: {adx:.2f}")
+                self.logger.info(f"- RSI: {rsi:.2f}")
+                self.logger.info(f"- MACD: {macd:.2f} > Signal: {macd_signal:.2f}")
+                return True
+                
+            # 숏 포지션 조건
+            if (rsi > 70 and  # RSI 과매수
+                macd < macd_signal and  # MACD 하향 돌파
+                macd_hist < 0):  # MACD 히스토그램 음수
+                
+                self.logger.info(f"숏 진입 신호 발생:")
+                self.logger.info(f"- ADX: {adx:.2f}")
+                self.logger.info(f"- RSI: {rsi:.2f}")
+                self.logger.info(f"- MACD: {macd:.2f} < Signal: {macd_signal:.2f}")
+                return True
+                
+            return False
             
         except Exception as e:
             self.logger.error(f"진입 조건 확인 중 오류 발생: {e}")
-            return False, ""
+            return False
 
     def _adjust_leverage(self, market_data: Dict[str, Any]) -> None:
         """ATR 기반 레버리지 조정"""
         try:
-            # ATR 데이터 수집 (14일)
-            atr_series = market_data['indicators']['atr_series']  # ATR(14) 시계열
-            current_atr = atr_series.iloc[-1]
+            # ATR 데이터 수집 (1시간봉 기준)
+            atr_series = market_data['indicators']['atr_series']
+            current_price = market_data['current_price']
             
-            # ATR 백분위 계산
-            atr_percentile = pd.qcut(atr_series, q=4, labels=False).iloc[-1]  # 0-3 범위의 백분위 (25%씩)
-            
-            # 변동성 구간별 레버리지 설정
-            if atr_percentile == 3:  # 상위 25%
+            # 최소 데이터 포인트 확인
+            if len(atr_series) < 14:
+                self.logger.warning("ATR 데이터 부족: 기본 레버리지 사용")
                 self.config.leverage = 10
-                leverage_desc = "상위 25%"
-            elif atr_percentile == 2 or atr_percentile == 1:  # 중간 50%
-                self.config.leverage = 30
-                leverage_desc = "중간 50%"
-            else:  # 하위 25%
-                self.config.leverage = 50
-                leverage_desc = "하위 25%"
+                return
             
-            # 상세 로깅 추가
+            # 변동성 계산 (σ = ATR / Price)
+            current_atr = atr_series.iloc[-1]
+            volatility = current_atr / current_price
+            
+            # 레버리지 계산: leverage = max(10, min(75, int((1.8/σ) + 5)))
+            calculated_leverage = int((1.8 / volatility) + 5)
+            self.config.leverage = max(10, min(75, calculated_leverage))
+            
+            # 상세 로깅
             self.logger.info(f"=== 레버리지 조정 정보 ===")
             self.logger.info(f"현재 ATR14: {current_atr:.4f}")
-            self.logger.info(f"ATR 백분위: {atr_percentile} ({leverage_desc})")
-            self.logger.info(f"적용 레버리지: {self.config.leverage}x")
+            self.logger.info(f"현재 가격: {current_price:.2f}")
+            self.logger.info(f"변동성(σ): {volatility:.4f}")
+            self.logger.info(f"계산된 레버리지: {calculated_leverage}x")
+            self.logger.info(f"최종 적용 레버리지: {self.config.leverage}x")
             self.logger.info(f"=====================")
             
         except Exception as e:
@@ -595,14 +464,25 @@ class TradingStrategy:
     def check_stop_loss(self, pnl: float, volatility: float, side: str, entry_price: float, current_price: float) -> bool:
         """손절 조건 확인"""
         try:
-            # 손절 기준 완화
+            # 기본 손절 비율
+            base_sl_pct = 1.0  # 1%
+            
+            # 레버리지 기반 조정 계수
+            adj = 1 / (self.config.leverage ** 0.5)  # sqrt(leverage)로 나누기
+            
+            # 최종 손절 비율 계산
+            sl_pct = base_sl_pct * adj
+            
+            # 손절 조건 확인
             if side == 'long':
                 loss_pct = (entry_price - current_price) / entry_price
-                if loss_pct > 0.05:  # 손절 기준 5%로 완화
+                if loss_pct > sl_pct:
+                    self.logger.info(f"손절 조건 충족: 손실률 {loss_pct:.2%} > {sl_pct:.2%}")
                     return True
             else:  # short
                 loss_pct = (current_price - entry_price) / entry_price
-                if loss_pct > 0.05:  # 손절 기준 5%로 완화
+                if loss_pct > sl_pct:
+                    self.logger.info(f"손절 조건 충족: 손실률 {loss_pct:.2%} > {sl_pct:.2%}")
                     return True
                     
             return False
@@ -611,24 +491,61 @@ class TradingStrategy:
             self.logger.error(f"손절 조건 확인 중 오류: {e}")
             return False
 
-    def check_take_profit(self, pnl: float, volatility: float, side: str, entry_price: float, current_price: float) -> bool:
+    def check_take_profit(self, pnl: float, volatility: float, side: str, entry_price: float, current_price: float) -> Tuple[bool, float]:
         """익절 조건 확인"""
         try:
-            # 익절 기준 완화
+            # 기본 익절 비율
+            base_tp1_pct = 1.5  # 1.5%
+            base_tp2_pct = 3.0  # 3.0%
+            
+            # 레버리지 기반 조정 계수
+            adj = 1 / (self.config.leverage ** 0.5)
+            
+            # 최종 익절 비율 계산
+            tp1_pct = base_tp1_pct * adj
+            tp2_pct = base_tp2_pct * adj
+            
+            # 현재 수익률 계산
             if side == 'long':
                 profit_pct = (current_price - entry_price) / entry_price
-                if profit_pct > 0.15:  # 익절 기준 15%로 완화
-                    return True
             else:  # short
                 profit_pct = (entry_price - current_price) / entry_price
-                if profit_pct > 0.15:  # 익절 기준 15%로 완화
-                    return True
-                    
-            return False
+            
+            # 최고 수익률 추적
+            if not hasattr(self, 'peak_profit'):
+                self.peak_profit = profit_pct
+            else:
+                self.peak_profit = max(self.peak_profit, profit_pct)
+            
+            # 트레일링 스탑 로직
+            if self.peak_profit > tp1_pct:
+                # 1차 청산 (최고 수익의 30% 하락 시)
+                if not hasattr(self, 'first_target_hit') and profit_pct <= self.peak_profit * 0.7:
+                    self.logger.info(f"1차 익절 조건 충족:")
+                    self.logger.info(f"- 최고 수익률: {self.peak_profit:.2%}")
+                    self.logger.info(f"- 현재 수익률: {profit_pct:.2%}")
+                    self.logger.info(f"- 하락률: {(1 - profit_pct/self.peak_profit):.2%}")
+                    self.first_target_hit = True
+                    return True, 0.5  # 50% 청산
+                
+                # 2차 청산 (최고 수익의 60% 하락 시)
+                if hasattr(self, 'first_target_hit') and profit_pct <= self.peak_profit * 0.4:
+                    self.logger.info(f"2차 익절 조건 충족:")
+                    self.logger.info(f"- 최고 수익률: {self.peak_profit:.2%}")
+                    self.logger.info(f"- 현재 수익률: {profit_pct:.2%}")
+                    self.logger.info(f"- 하락률: {(1 - profit_pct/self.peak_profit):.2%}")
+                    return True, 1.0  # 잔여분 전량 청산
+            
+            # 초기 익절 조건 (트레일링 스탑 활성화 전)
+            if profit_pct >= tp2_pct:
+                self.logger.info(f"초기 익절 조건 충족: 수익률 {profit_pct:.2%} >= {tp2_pct:.2%}")
+                return True, 1.0  # 전량 청산
+            
+            return False, 0.0
             
         except Exception as e:
             self.logger.error(f"익절 조건 확인 중 오류: {e}")
-            return False
+            return False, 0.0
 
     def _calculate_liquidation_price(self, side: str, entry_price: float, leverage: float) -> float:
         """청산가 계산"""
@@ -642,118 +559,158 @@ class TradingStrategy:
             logger.error(f"청산가 계산 실패: {e}")
             return 0.0
 
-    def check_exit_conditions(self, market_data: Dict[str, Any], side: str, entry_price: float) -> Tuple[bool, float]:
-        """청산 조건 체크"""
+    def check_exit_conditions(self, indicators: Dict[str, Any]) -> bool:
+        """청산 조건 확인"""
         try:
-            indicators = market_data['indicators']
-            current_price = market_data['current_price']
+            # 1. ADX 기반 추세 약화 확인
+            adx = indicators['adx'].iloc[-1]
+            if adx < 20:  # 추세가 약해지면 청산
+                self.logger.info(f"ADX {adx:.2f} < 20: 추세 약화로 청산")
+                return True
+                
+            # 2. RSI + MACD 반전 신호
+            rsi = indicators['rsi'].iloc[-1]
+            macd = indicators['macd'].iloc[-1]
+            macd_signal = indicators['macd_signal'].iloc[-1]
             
-            # RSI 상태 확인
-            rsi = indicators['rsi']['short_term']
-            
-            # MACD 상태 확인
-            macd_hist = indicators['macd']['histogram']
-            macd_hist_prev = indicators['macd']['histogram_prev']
-            
-            # 스토캐스틱 상태 확인
-            stoch_k = indicators['stoch_k']
-            stoch_d = indicators['stoch_d']
-            stoch_k_prev = indicators['stoch_k_prev']
-            stoch_d_prev = indicators['stoch_d_prev']
-            
-            # 손익률 계산
-            pnl = (current_price - entry_price) / entry_price if side == 'long' else (entry_price - current_price) / entry_price
-            
-            # 1. 손절 조건 (단계별 청산)
-            if pnl <= -0.03:  # -3.0% 달성 시 잔여량 전량 청산
-                self.logger.info(f"2단계 손절 조건 충족: PNL {pnl:.2%}")
-                return True, 1.0
-            elif pnl <= -0.015:  # -1.5% 달성 시 30% 청산
-                if not hasattr(self, 'first_stop_loss_hit'):
-                    self.logger.info(f"1단계 손절 조건 충족: PNL {pnl:.2%}")
-                    self.first_stop_loss_hit = True
-                    return True, 0.3
-            
-            # 2. 익절 조건 (단계별 청산)
-            if pnl >= 0.06:  # 6.0% 달성 시 잔여량 전량 청산
-                self.logger.info(f"2단계 익절 조건 충족: PNL {pnl:.2%}")
-                return True, 1.0
-            elif pnl >= 0.02:  # 2.0% 달성 시 40% 청산
-                if not hasattr(self, 'first_target_hit'):
-                    self.logger.info(f"1단계 익절 조건 충족: PNL {pnl:.2%}")
-                    self.first_target_hit = True
-                    return True, 0.4
-            
-            # 3. 트레일링 스탑
-            if pnl >= 0.02:  # 2.0% 이상 수익 시 트레일링 스탑 활성화
-                if not self.trailing_stop_active:
-                    self.trailing_stop_active = True
-                    self.trailing_stop_price = current_price
-                    self.logger.info("트레일링 스탑 활성화")
-                else:
-                    if side == 'long' and current_price > self.trailing_stop_price:
-                        self.trailing_stop_price = current_price
-                    elif side == 'short' and current_price < self.trailing_stop_price:
-                        self.trailing_stop_price = current_price
-                    
-                    # 트레일링 스탑 도달 시 청산 (1.5% 하락)
-                    if (side == 'long' and current_price < self.trailing_stop_price * 0.985) or \
-                       (side == 'short' and current_price > self.trailing_stop_price * 1.015):
-                        self.logger.info("트레일링 스탑 조건 충족")
-                        return True, 1.0
-            
-            # 4. 반대 신호 청산
-            # RSI 역전
-            if (side == 'long' and rsi > 75) or (side == 'short' and rsi < 25):
-                self.logger.info(f"RSI 역전 조건 충족: RSI {rsi}")
-                return True, 1.0
-            
-            # MACD 히스토그램 반전
-            if (side == 'long' and macd_hist < 0 and macd_hist_prev > 0) or \
-               (side == 'short' and macd_hist > 0 and macd_hist_prev < 0):
-                self.logger.info("MACD 히스토그램 반전 조건 충족")
-                return True, 1.0
-            
-            # 스토캐스틱 %K/%D 역교차
-            if (side == 'long' and stoch_k < stoch_d and stoch_k_prev > stoch_d_prev) or \
-               (side == 'short' and stoch_k > stoch_d and stoch_k_prev < stoch_d_prev):
-                self.logger.info("스토캐스틱 %K/%D 역교차 조건 충족")
-                return True, 1.0
-            
-            return False, 0.0
+            # 롱 포지션 청산
+            if (rsi > 70 or  # RSI 과매수
+                (macd < macd_signal and macd_hist < 0)):  # MACD 하향 돌파
+                self.logger.info(f"롱 청산 신호 발생:")
+                self.logger.info(f"- RSI: {rsi:.2f}")
+                self.logger.info(f"- MACD: {macd:.2f} < Signal: {macd_signal:.2f}")
+                return True
+                
+            # 숏 포지션 청산
+            if (rsi < 30 or  # RSI 과매도
+                (macd > macd_signal and macd_hist > 0)):  # MACD 상향 돌파
+                self.logger.info(f"숏 청산 신호 발생:")
+                self.logger.info(f"- RSI: {rsi:.2f}")
+                self.logger.info(f"- MACD: {macd:.2f} > Signal: {macd_signal:.2f}")
+                return True
+                
+            return False
             
         except Exception as e:
             self.logger.error(f"청산 조건 확인 중 오류 발생: {e}")
-            return False, 0.0
+            return False
 
     def execute_trade(self, market_data: Dict[str, Any]) -> None:
         """거래 실행"""
         try:
+            # 최종 검증
+            if not self._validate_trade_conditions(market_data):
+                self.logger.warning("거래 조건 검증 실패: 거래 취소")
+                return
+
+            # 포지션 모드 확인 및 설정
+            if not self._check_and_set_position_mode():
+                self.logger.error("포지션 모드 설정 실패")
+                return
+
             # 매수 수량 계산
             position_size = self.calculate_position_size(market_data['current_price'], market_data['indicators']['atr'].iloc[-1])
             
+            if position_size <= 0:
+                self.logger.error("유효하지 않은 포지션 사이즈")
+                return
+            
             # 시장가 매수 주문
-            self.exchange.create_order(
+            order = self.exchange.create_order(
                 symbol=self.exchange.symbol,
                 side='BUY',
                 quantity=position_size,
                 order_type='MARKET'
             )
             
+            if not order:
+                self.logger.error("주문 실행 실패")
+                return
+            
             # 5분 대기
             time.sleep(300)
             
             # 시장가 매도 주문
-            self.exchange.create_order(
+            exit_order = self.exchange.create_order(
                 symbol=self.exchange.symbol,
                 side='SELL',
                 quantity=position_size,
                 order_type='MARKET'
             )
             
+            if not exit_order:
+                self.logger.error("청산 주문 실행 실패")
+                # 여기서 추가적인 청산 시도나 알림 로직 추가 가능
+            
         except Exception as e:
             self.logger.error(f"거래 실행 중 오류 발생: {e}")
-            raise
+            # 오류 발생 시 안전한 상태로 복구
+            self._recover_from_error()
+            return
+
+    def _validate_trade_conditions(self, market_data: Dict[str, Any]) -> bool:
+        """거래 실행 전 최종 검증"""
+        try:
+            # 기본 데이터 검증
+            if not market_data or not isinstance(market_data, dict):
+                return False
+
+            # 가격 데이터 검증
+            if 'current_price' not in market_data or market_data['current_price'] <= 0:
+                return False
+
+            # 지표 데이터 검증
+            indicators = market_data.get('indicators', {})
+            if not indicators or not isinstance(indicators, dict):
+                return False
+
+            # ATR 데이터 검증
+            if 'atr' not in indicators or len(indicators['atr']) < 14:
+                return False
+
+            # 거래량 데이터 검증
+            if 'volume' not in indicators:
+                return False
+
+            return True
+
+        except Exception as e:
+            self.logger.error(f"거래 조건 검증 중 오류 발생: {e}")
+            return False
+
+    def _check_and_set_position_mode(self) -> bool:
+        """포지션 모드 확인 및 설정"""
+        try:
+            current_mode = self.exchange.get_position_mode()
+            if current_mode != self.config.position_mode:
+                success = self.exchange.set_position_mode(self.config.position_mode)
+                if not success:
+                    self.logger.error(f"포지션 모드 변경 실패: {self.config.position_mode}")
+                    return False
+            return True
+        except Exception as e:
+            self.logger.error(f"포지션 모드 확인 중 오류 발생: {e}")
+            return False
+
+    def _recover_from_error(self):
+        """오류 발생 시 복구"""
+        try:
+            # 현재 포지션 확인
+            position = self.exchange.get_position()
+            if position and position['size'] > 0:
+                # 포지션이 있다면 청산 시도
+                self.exchange.create_order(
+                    symbol=self.exchange.symbol,
+                    side='SELL' if position['side'] == 'long' else 'BUY',
+                    quantity=position['size'],
+                    order_type='MARKET'
+                )
+            
+            # 전략 상태 초기화
+            self.reset()
+            
+        except Exception as e:
+            self.logger.error(f"오류 복구 중 추가 오류 발생: {e}")
 
     def health_check(self) -> None:
         """시스템 헬스 체크"""
@@ -829,37 +786,39 @@ class TradingStrategy:
         """추세 분석"""
         try:
             # ADX 기반 추세 강도
-            adx = indicators.get('adx', {})
-            trend_strength = adx.get('trend_strength', 'weak')
-            trend_direction = adx.get('trend_direction', 'neutral')
+            adx = indicators.get('adx', 25)
+            trend_strength = 'strong' if adx >= 25 else 'weak'
+            trend_direction = 'up' if indicators.get('macd', {}).get('histogram', 0) > 0 else 'down'
             
             # MACD 기반 추세 확인
             macd = indicators.get('macd', {})
-            macd_state = macd.get('state', 'neutral')
-            
-            # 일목균형표 기반 추세 확인
-            ichimoku = indicators.get('ichimoku', {})
-            cloud_state = ichimoku.get('cloud_state', 'neutral')
-            conversion_base = ichimoku.get('conversion_base', 'neutral')
+            macd_state = 'bullish' if isinstance(macd, dict) and macd.get('histogram', 0) > 0 else 'bearish'
             
             # 볼린저 밴드 기반 추세 확인
             bb = indicators.get('bollinger', {})
-            bb_state = bb.get('state', 'normal')
-            bb_width = bb.get('width', 0.0)
+            bb_state = 'normal'
+            bb_width = 0.0
+            if isinstance(bb, dict):
+                bb_state = bb.get('state', 'normal')
+                bb_width = bb.get('width', 0.0)
             
             return {
                 'strength': trend_strength,
                 'direction': trend_direction,
                 'macd_state': macd_state,
-                'cloud_state': cloud_state,
-                'conversion_base': conversion_base,
                 'bb_state': bb_state,
                 'bb_width': bb_width
             }
             
         except Exception as e:
             logger.error(f"추세 분석 중 오류 발생: {e}")
-            return None
+            return {
+                'strength': 'weak',
+                'direction': 'neutral',
+                'macd_state': 'neutral',
+                'bb_state': 'normal',
+                'bb_width': 0.0
+            }
 
     def calculate_position_size(self, current_price: float, atr: float) -> float:
         """포지션 사이즈 계산"""
@@ -870,8 +829,8 @@ class TradingStrategy:
                 self.logger.error("계좌 잔고를 가져올 수 없습니다.")
                 return 0.0
 
-            # 리스크 금액 계산 (계좌 잔고의 0.5%)
-            risk_amount = account_balance * 0.005
+            # 리스크 금액 계산 (계좌 잔고의 0.1%로 감소)
+            risk_amount = account_balance * 0.001  # 0.5% -> 0.1%로 감소
             
             # ATR 기반 포지션 사이즈 계산
             position_size = risk_amount / (atr * 2)  # ATR의 2배를 리스크로 설정
@@ -956,3 +915,5 @@ class TradingStrategy:
         self.consecutive_losses = 0
         self._indicators_cache.clear()
         self._last_calculation_time = None 
+        self.peak_profit = 0.0  # 최고 수익률 초기화
+        self.first_target_hit = False  # 1차 청산 상태 초기화 
